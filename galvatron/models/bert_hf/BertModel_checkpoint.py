@@ -6,11 +6,10 @@ import torch.nn.functional as F
 from megatron.core.tensor_parallel.utils import VocabUtility
 import torch.distributed as dist
 
-# 与checkpoint转换文件保持一致的文件名格式
 embedding_name = "bert_embeddings.pt"
 layer_name = "bert_encoder_layer_%d.pt"
 pooler_name = "bert_pooler.pt"
-cls_name = "cls_predictions.pt"  # MLM头的文件名
+cls_name = "cls_predictions.pt"
 
 @torch.no_grad()
 def load_bert_module(load, tp_groups, name, submodule, module):
@@ -18,7 +17,6 @@ def load_bert_module(load, tp_groups, name, submodule, module):
     rank = dist.get_rank(tp_groups)
     args = get_args()
 
-    # 处理embeddings层
     if name.endswith("word_embeddings"):
         file_path = os.path.join(load, embedding_name)
         checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
@@ -47,7 +45,6 @@ def load_bert_module(load, tp_groups, name, submodule, module):
         weight = checkpoint["token_type_embeddings.weight"].to(device="cuda", dtype=torch.float32)
         submodule.weight.copy_(weight)
     
-    # 处理LayerNorm
     elif name.endswith("LayerNorm"):
         if "attention" in name:
             file_path = os.path.join(load, layer_name % module.idx)
@@ -59,7 +56,7 @@ def load_bert_module(load, tp_groups, name, submodule, module):
             checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
             weight = checkpoint["output.LayerNorm.weight"].to(device="cuda", dtype=torch.float32)
             bias = checkpoint["output.LayerNorm.bias"].to(device="cuda", dtype=torch.float32)
-        else:  # embedding层的LayerNorm
+        else:   
             file_path = os.path.join(load, embedding_name)
             checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
             weight = checkpoint["LayerNorm.weight"].to(device="cuda", dtype=torch.float32)
@@ -67,13 +64,11 @@ def load_bert_module(load, tp_groups, name, submodule, module):
         submodule.weight.copy_(weight)
         submodule.bias.copy_(bias)
     
-    # 处理MLM头
     elif name.endswith("cls"):
         file_path = os.path.join(load, cls_name)
         checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
         
         if hasattr(submodule, "predictions"):
-            # Transform层
             transform_weight = checkpoint["transform.dense.weight"].to(device="cuda", dtype=torch.float32)
             transform_bias = checkpoint["transform.dense.bias"].to(device="cuda", dtype=torch.float32)
             transform_ln_weight = checkpoint["transform.LayerNorm.weight"].to(device="cuda", dtype=torch.float32)
@@ -84,7 +79,6 @@ def load_bert_module(load, tp_groups, name, submodule, module):
             submodule.predictions.transform.LayerNorm.weight.copy_(transform_ln_weight)
             submodule.predictions.transform.LayerNorm.bias.copy_(transform_ln_bias)
             
-            # Decoder层
             vocab_size = checkpoint["decoder.weight"].shape[0]
             padding_size = args.padded_vocab_size - vocab_size
             padded_weight = F.pad(
@@ -102,14 +96,12 @@ def load_bert_module(load, tp_groups, name, submodule, module):
                 decoder_bias = checkpoint["decoder.bias"].to(device="cuda", dtype=torch.float32)
                 submodule.predictions.decoder.bias.copy_(decoder_bias)
     
-    # 处理Transformer层
     else:
         file_path = os.path.join(load, layer_name % module.idx)
         checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
         
         if name.startswith("attention"):
             if name.endswith("query_key_value"):
-                # 合并QKV权重和偏置
                 q_weight = checkpoint["attention.self.query.weight"].to(device="cuda", dtype=torch.float32)
                 k_weight = checkpoint["attention.self.key.weight"].to(device="cuda", dtype=torch.float32)
                 v_weight = checkpoint["attention.self.value.weight"].to(device="cuda", dtype=torch.float32)
