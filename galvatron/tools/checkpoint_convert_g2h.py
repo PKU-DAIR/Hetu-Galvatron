@@ -2,7 +2,7 @@ import torch
 import os
 import argparse
 from collections import defaultdict
-from transformers import LlamaForCausalLM
+from transformers import LlamaForCausalLM, BertForMaskedLM
 from galvatron.models.llama_hf.meta_configs.config_utils import config_from_meta
 import torch.nn.functional as F
 from megatron.core.tensor_parallel.utils import VocabUtility
@@ -108,6 +108,148 @@ def convert_checkpoints_llama(input_checkpoint_path, output_dir, load_iteration,
     llama_model.save_pretrained(output_dir)
     print(f"Successfully converted checkpoint to HuggingFace format at {output_dir}")
 
+def convert_checkpoints_bert_mlm(input_checkpoint_path, output_dir, load_iteration, model_config):
+    config = config_from_meta(model_config)
+    model = BertForMaskedLM(config)
+    
+    iter_dir = os.path.join(input_checkpoint_path, f"iter_{load_iteration}")
+
+    embed_dir = os.path.join(iter_dir, "model_embed_tokens")
+    assert os.path.exists(embed_dir), f"Embedding directory {embed_dir} does not exist"
+    
+    weights = []
+    for rank_file in sorted(os.listdir(embed_dir)):
+        checkpoint = torch.load(os.path.join(embed_dir, rank_file), map_location='cpu')
+        weights.append(checkpoint["word_embeddings.weight"])
+    weights = torch.cat(weights, dim=0)
+    if weights.shape[0] > config.vocab_size:
+        weights = weights[:config.vocab_size].contiguous()
+    model.bert.embeddings.word_embeddings.weight.data.copy_(weights)
+    
+    pos_embed_file = os.path.join(embed_dir, "0.pt")  
+    checkpoint = torch.load(pos_embed_file, map_location='cpu')
+    model.bert.embeddings.position_embeddings.weight.data.copy_(
+        checkpoint["position_embeddings.weight"]
+    )
+    
+    model.bert.embeddings.token_type_embeddings.weight.data.copy_(
+        checkpoint["token_type_embeddings.weight"]
+    )
+    
+    model.bert.embeddings.LayerNorm.weight.data.copy_(
+        checkpoint["LayerNorm.weight"]
+    )
+    model.bert.embeddings.LayerNorm.bias.data.copy_(
+        checkpoint["LayerNorm.bias"]
+    )
+    
+    for layer_idx in range(config.num_hidden_layers):
+        layer_dir = os.path.join(iter_dir, f"model_layers_{layer_idx}")
+        assert os.path.exists(layer_dir), f"Layer directory {layer_dir} does not exist"
+        
+        q_weights, k_weights, v_weights = [], [], []
+        q_bias, k_bias, v_bias = [], [], []
+        o_weights, o_bias = [], []
+        intermediate_weights, intermediate_bias = [], []
+        output_weights, output_bias = [], []
+        
+        tp_size = len(os.listdir(layer_dir))
+        for rank_file in sorted(os.listdir(layer_dir)):
+            checkpoint = torch.load(os.path.join(layer_dir, rank_file), map_location='cpu')
+            
+            qkv_weight = checkpoint["attention.self.query_key_value.weight"]
+            qkv_bias = checkpoint["attention.self.query_key_value.bias"]
+            
+            hidden_size = config.hidden_size
+            attention_head_size = hidden_size // config.num_attention_heads
+            nh = config.num_attention_heads // tp_size
+            
+            q = qkv_weight[:hidden_size]
+            k = qkv_weight[hidden_size:2*hidden_size]
+            v = qkv_weight[2*hidden_size:]
+            
+            q_b = qkv_bias[:hidden_size]
+            k_b = qkv_bias[hidden_size:2*hidden_size]
+            v_b = qkv_bias[2*hidden_size:]
+            
+            q_weights.append(q)
+            k_weights.append(k)
+            v_weights.append(v)
+            q_bias.append(q_b)
+            k_bias.append(k_b)
+            v_bias.append(v_b)
+            
+            o_weights.append(checkpoint["attention.output.dense.weight"])
+            o_bias.append(checkpoint["attention.output.dense.bias"])
+            
+            intermediate_weights.append(checkpoint["intermediate.dense.weight"])
+            intermediate_bias.append(checkpoint["intermediate.dense.bias"])
+            
+            output_weights.append(checkpoint["output.dense.weight"])
+            output_bias.append(checkpoint["output.dense.bias"])
+            
+            model.bert.encoder.layer[layer_idx].attention.output.LayerNorm.weight.data.copy_(
+                checkpoint["attention.output.LayerNorm.weight"]
+            )
+            model.bert.encoder.layer[layer_idx].attention.output.LayerNorm.bias.data.copy_(
+                checkpoint["attention.output.LayerNorm.bias"]
+            )
+            model.bert.encoder.layer[layer_idx].output.LayerNorm.weight.data.copy_(
+                checkpoint["output.LayerNorm.weight"]
+            )
+            model.bert.encoder.layer[layer_idx].output.LayerNorm.bias.data.copy_(
+                checkpoint["output.LayerNorm.bias"]
+            )
+        
+        layer = model.bert.encoder.layer[layer_idx]
+        layer.attention.self.query.weight.data.copy_(torch.cat(q_weights, dim=0))
+        layer.attention.self.key.weight.data.copy_(torch.cat(k_weights, dim=0))
+        layer.attention.self.value.weight.data.copy_(torch.cat(v_weights, dim=0))
+        layer.attention.self.query.bias.data.copy_(torch.cat(q_bias, dim=0))
+        layer.attention.self.key.bias.data.copy_(torch.cat(k_bias, dim=0))
+        layer.attention.self.value.bias.data.copy_(torch.cat(v_bias, dim=0))
+        
+        layer.attention.output.dense.weight.data.copy_(torch.cat(o_weights, dim=1))
+        layer.attention.output.dense.bias.data.copy_(o_bias[0])  
+        
+        layer.intermediate.dense.weight.data.copy_(torch.cat(intermediate_weights, dim=0))
+        layer.intermediate.dense.bias.data.copy_(torch.cat(intermediate_bias, dim=0))
+        
+        layer.output.dense.weight.data.copy_(torch.cat(output_weights, dim=1))
+        layer.output.dense.bias.data.copy_(output_bias[0])
+    
+    mlm_dir = os.path.join(iter_dir, "cls_predictions")
+    assert os.path.exists(mlm_dir), f"MLM directory {mlm_dir} does not exist"
+    
+    for rank_file in sorted(os.listdir(mlm_dir)):
+        checkpoint = torch.load(os.path.join(mlm_dir, rank_file), map_location='cpu')
+        
+        model.cls.predictions.transform.dense.weight.data.copy_(
+            checkpoint["transform.dense.weight"]
+        )
+        model.cls.predictions.transform.dense.bias.data.copy_(
+            checkpoint["transform.dense.bias"]
+        )
+        model.cls.predictions.transform.LayerNorm.weight.data.copy_(
+            checkpoint["transform.LayerNorm.weight"]
+        )
+        model.cls.predictions.transform.LayerNorm.bias.data.copy_(
+            checkpoint["transform.LayerNorm.bias"]
+        )
+        
+        if not config.tie_word_embeddings:
+            model.cls.predictions.decoder.weight.data.copy_(
+                checkpoint["decoder.weight"]
+            )
+            if hasattr(model.cls.predictions.decoder, "bias"):
+                model.cls.predictions.decoder.bias.data.copy_(
+                    checkpoint["decoder.bias"]
+                )
+    
+    os.makedirs(output_dir, exist_ok=True)
+    model.save_pretrained(output_dir)
+    print(f"Successfully converted checkpoint to HuggingFace format at {output_dir}")
+
 def main():
     parser = argparse.ArgumentParser(description="Convert Galvatron checkpoints to HuggingFace format.")
     parser.add_argument("--load_iteration", type=int, required=True, help="Iteration to load.")
@@ -123,5 +265,7 @@ def main():
         pass
     elif args.model_type == 'llama':
         convert_checkpoints_llama(args.input_checkpoint, args.output_dir, args.load_iteration, args.model_config)
+    elif args.model_type == 'bert_mlm':
+        convert_checkpoints_bert_mlm(args.input_checkpoint, args.output_dir, args.load_iteration, args.model_config)
 if __name__ == "__main__":
     main()
