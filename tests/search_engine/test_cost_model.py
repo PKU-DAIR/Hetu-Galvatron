@@ -1,6 +1,8 @@
 import pytest
 import numpy as np
-from galvatron.core.search_engine.cost_model import MemoryCostModel, TimeCostModel, OtherTimeCostModel
+from galvatron.core.search_engine.cost_model import MemoryCostDecoupleModel as MemoryCostModel
+from galvatron.core.search_engine.cost_model import TimeCostDecoupleModel as TimeCostModel
+from galvatron.core.search_engine.cost_model import OtherTimeCostDecoupleModel as OtherTimeCostModel
 from tests.utils.cost_args import MemoryModelArgs, TimeModelArgs
 
 @pytest.fixture
@@ -326,7 +328,7 @@ def test_time_cost_model(time_model_args, strategy, config_updates, expected):
             # Verify tp message size calculation
             tp_comm_times = 4
             expected_tp_message_size = 2*(model.tp_size-1)/model.tp_size * \
-                (model.bs*model.sl*model.hs*tp_comm_times*4/1024/1024) * model.layer_num
+                (model.bsz*model.seq_len*model.hidden_size*tp_comm_times*4/1024/1024) * model.layer_num
             if args.mixed_precision:
                 expected_tp_message_size /= 2
             if not model.checkpoint:
@@ -337,10 +339,10 @@ def test_time_cost_model(time_model_args, strategy, config_updates, expected):
     if expected.get('check_pp'):
         if model.p2p_comm_coe is not None:
             # Verify p2p message size calculation
-            expected_p2p_size = model.pp_size*2*model.bs*model.sl*model.hs*4/1024/1024
+            expected_p2p_size = model.pp_size*2*model.bsz*model.seq_len*model.hidden_size*4/1024/1024
             if args.mixed_precision:
                 expected_p2p_size /= 2
-            assert model.p2p_meg_size == expected_p2p_size, "P2P message size mismatch"
+            assert model.p2p_message_size == expected_p2p_size, "P2P message size mismatch"
     
     # Sequence parallel related checks
     if expected.get('check_sp'):
@@ -349,7 +351,7 @@ def test_time_cost_model(time_model_args, strategy, config_updates, expected):
         
         if expected.get('check_tp_comm'):
             # Verify tp communication in SP
-            per_tp_message_size = model.bs*model.sl*model.hs * (2 if args.mixed_precision else 4)
+            per_tp_message_size = model.bsz*model.seq_len*model.hidden_size * (2 if args.mixed_precision else 4)
             assert model.per_tp_message_size == per_tp_message_size, "TP message size mismatch in SP"
             assert model.tp_comm_num == 4 * model.layer_num, "TP communication count mismatch"
     

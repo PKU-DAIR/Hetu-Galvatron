@@ -37,7 +37,7 @@ SEARCH_SPACE_ARGS="
     --max_tp_deg 8 \
     --max_pp_deg 16 \
     --fine_grained_mode ${FINE_GRAINED} \
-    --profile_mode sequence \
+    --time_profile_mode sequence \
     --no_async_grad_reduce \
     --sequence_parallel
 "

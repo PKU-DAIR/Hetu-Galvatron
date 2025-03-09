@@ -14,8 +14,10 @@ from galvatron.utils import (
     num2str
 )
 from scipy.optimize import curve_fit
-from .cost_model import MemoryCostModel, TimeCostModel, pipeline_costmodel
+from .cost_model import pipeline_costmodel
+from .cost_model import MemoryCostModel, TimeCostModel
 from .dynamic_programming import DpOnModel
+from .cost_model import ModelArgs, ParallelArgs, TrainArgs, ProfileModelArgs, ProfileHardwareArgs
 
 class GalvatronSearchEngine():
     def __init__(self, args):
@@ -283,58 +285,52 @@ class GalvatronSearchEngine():
         return self.allreduce_bandwidth, self.p2p_bandwidth, self.overlap_coe, self.sp_allreduce, self.sp_all2all
 
     def set_cost_models(self):
-        self.set_time_cost_models()
-        self.set_memory_cost_models()
-    
-    def set_time_cost_models(self):
-        self.timecost_model_args_list = []
+        self.model_args_list, self.train_args_list, self.parallel_args_list, self.profile_model_args_list, self.profile_hardware_args_list = [], [], [], [], []
         for i in range(self.num_layertype):
-            self.timecost_model_args_list.append({ 
-                    'parameter_size': self.param_sizes[i],
-                    'microbatch': False if self.use_pipeline_costmodel else True,
-                    'optimal_chunk_func': self.optimal_chunk_func,
-                    'sequence_length': self.seqlen_list[i],
-                    'hidden_size': self.hiddensize_list[i],
-                    'vocab_size': self.args.padded_vocab_size if hasattr(self.args, 'padded_vocab_size') else self.args.num_classes, # For Swin model
-                    'forward_computation_time': self.time_profiled_list[i],
-                    'bct_fct_coe': 2,
-                    'extra_overhead': 0,
-                    'comm_coe_dict': self.allreduce_comm_coe,
-                    'dp_overlap_coe': self.overlap_coe,
-                    'bct_overlap_coe': self.overlap_coe,
-                    'p2p_comm_coe_dict': self.p2p_comm_coe,
-                    'layer_num': self.layernum_list[i],
-                    'use_zero2_for_dp': 1 if self.args.default_dp_type == 'zero2' else 0,
-                    'mixed_precision': False if self.args.mixed_precision == 'fp32' else True,
-                    'costmodel_coe': self.args.costmodel_coe,
-                    'async_grad_reduce': self.args.async_grad_reduce,
-                    'allreduce_dict': self.sp_allreduce,
-                    'all2all_dict': self.sp_all2all,
-                    'sp_space': self.args.sp_space,
-                    })
-    
-    def set_memory_cost_models(self):
-        self.memcost_model_args_list = []
-        for i in range(self.num_layertype):
-            self.memcost_model_args_list.append({  
-                    'parameter_size': self.param_sizes[i],
-                    'tp_activation_per_bsz_dict': self.act_sizes[i],
-                    'other_memory_pp_off': self.other_memory_pp_off,
-                    'other_memory_pp_on': self.other_memory_pp_on,
-                    'microbatch': True,
-                    'optimal_chunk_func': self.optimal_chunk_func,
-                    'model_type': self.model_type,
-                    'checkpoint': 0 if self.args.disable_ckpt else 1,
-                    'use_zero2_for_dp':1 if self.args.default_dp_type == 'zero2' else 0,
-                    'use_zero3_for_embed':self.args.embed_sdp,
-                    'mixed_precision': False if self.args.mixed_precision == 'fp32' else True,
-                    'pipeline_type': self.args.pipeline_type,
-                    'disable_vtp': self.args.disable_vtp,
-                    'max_tp_deg': self.args.max_tp_deg,
-                    'gpu_num': self.args.gpu_num,
-                    'async_grad_reduce': self.args.async_grad_reduce,
-                    'sequence_parallel': self.args.sequence_parallel,
-                    })
+            model_args = ModelArgs(
+                parameter_size=self.param_sizes[i],
+                seq_length=self.seqlen_list[i],
+                hidden_size=self.hiddensize_list[i],
+                layer_num=self.layernum_list[i],
+            )
+            train_args = TrainArgs(
+                mixed_precision=False if self.args.mixed_precision == 'fp32' else True,
+                checkpoint=False if self.args.disable_ckpt else True,
+                async_grad_reduce=self.args.async_grad_reduce,
+            )
+            parallel_args = ParallelArgs(
+                use_zero2_for_dp=True if self.args.default_dp_type == 'zero2' else False,
+                use_zero3_for_embed=self.args.embed_sdp,
+                max_tp_deg=self.args.max_tp_deg,
+                disable_vtp=self.args.disable_vtp,
+                sequence_parallel=self.args.sequence_parallel,
+                sp_space=self.args.sp_space,
+                pipeline_type=self.args.pipeline_type,
+                optimal_chunk_func=self.optimal_chunk_func,
+            )
+            profile_model_args = ProfileModelArgs(
+                tp_activation_per_bsz_dict=self.act_sizes[i],
+                other_memory_pp_off=self.other_memory_pp_off,
+                other_memory_pp_on=self.other_memory_pp_on,
+                forward_computation_time=self.time_profiled_list[i],
+                other_time_profiled=self.other_time_profiled_list[0],
+            )
+            profile_hardware_args = ProfileHardwareArgs(
+                bct_fct_coe=2,
+                extra_overhead=0,
+                comm_coe_dict=self.allreduce_comm_coe,
+                dp_overlap_coe=self.overlap_coe,
+                bct_overlap_coe=self.overlap_coe,
+                p2p_comm_coe_dict=self.p2p_comm_coe,
+                costmodel_coe=self.args.costmodel_coe,
+                allreduce_dict=self.sp_allreduce,
+                all2all_dict=self.sp_all2all,
+            )
+            self.model_args_list.append(model_args)
+            self.train_args_list.append(train_args)
+            self.parallel_args_list.append(parallel_args)
+            self.profile_model_args_list.append(profile_model_args)
+            self.profile_hardware_args_list.append(profile_hardware_args)
     
     # =============== For Galvatron Search Engine Parallelism Optimization ===============
     def parallelism_optimization(self):
@@ -421,7 +417,7 @@ class GalvatronSearchEngine():
                                 if len(self.strategies) == 0:
                                     continue
 
-                                pp_stage_dict = get_pp_stage_for_bsz(self.strategies, self.memcost_model_args_list, self.layernum_list, bsz, mbsz_dict)
+                                pp_stage_dict = get_pp_stage_for_bsz(self.strategies, self.model_args_list, self.train_args_list, self.parallel_args_list, self.profile_model_args_list, self.layernum_list, bsz, mbsz_dict)
                                 
                                 results[bsz][chunk][min_tp][max_tp][vsp][sp_search] = self.dynamic_programming(bsz, chunk, mbsz_dict, pp_stage_dict, min_tp, max_tp, vsp, sp_search)
                                 min_res_list, min_pp_deg, throughput = results[bsz][chunk][min_tp][max_tp][vsp][sp_search]['min_res_list'], results[bsz][chunk][min_tp][max_tp][vsp][sp_search]['min_pp_deg'], results[bsz][chunk][min_tp][max_tp][vsp][sp_search]['throughput']
@@ -505,9 +501,11 @@ class GalvatronSearchEngine():
         max_bsz = 0
         bsz = scale
         while True:
-            pp_stage_dict = get_pp_stage_for_bsz(strategies, self.memcost_model_args_list, self.layernum_list, bsz)
+            pp_stage_dict = get_pp_stage_for_bsz(strategies, self.model_args_list, self.train_args_list, self.parallel_args_list, self.profile_model_args_list, self.layernum_list, bsz)
             dp_on_model = DpOnModel(strategies, MemoryCostModel, TimeCostModel, 
-                                    self.memcost_model_args_list, self.timecost_model_args_list,
+                                    model_args_list=self.model_args_list, train_args_list=self.train_args_list,
+                                    parallel_args_list=self.parallel_args_list, profile_model_args_list=self.profile_model_args_list,
+                                    profile_hardware_args_list=self.profile_hardware_args_list,
                                     max_mem=self.memory_constraint, layer_num=self.layernum_list, sequence_len = self.seqlen_list, 
                                     multi_layer_type = True, pp_stage_dict = pp_stage_dict,
                                     comm_coe_dict=self.allreduce_comm_coe, gpu_num=self.args.gpu_num,
@@ -525,9 +523,11 @@ class GalvatronSearchEngine():
         dp_on_model = DpOnModel(self.strategies, 
                                 MemoryCostModel, 
                                 TimeCostModel, 
-                                memcost_model_args=self.memcost_model_args_list,
-                                timecost_model_args=self.timecost_model_args_list,
-                                other_time_profiled_list=self.other_time_profiled_list,
+                                model_args_list=self.model_args_list,
+                                train_args_list=self.train_args_list,
+                                parallel_args_list=self.parallel_args_list,
+                                profile_model_args_list=self.profile_model_args_list,
+                                profile_hardware_args_list=self.profile_hardware_args_list,
                                 max_mem=self.memory_constraint,
                                 layer_num=self.layernum_list,
                                 sequence_len = self.seqlen_list,
@@ -619,9 +619,10 @@ class GalvatronSearchEngine():
         
         other = []
         for i in range(self.num_layertype):
-            memcost_model_args, timecost_model_args, layer_num = self.memcost_model_args_list[i], self.timecost_model_args_list[i], self.layernum_list[i]
+            model_args, train_args, parallel_args, profile_model_args, profile_hardware_args, layer_num = self.model_args_list[i], self.train_args_list[i], self.parallel_args_list[i], self.profile_model_args_list[i], self.profile_hardware_args_list[i], self.layernum_list[i]
             for strategy in self.strategies:
-                re = MemoryCostModel(strategy, global_batch_size=bsz, mbsz = mbsz_dict[strategy[0]], min_tp = min_tp, **memcost_model_args).get_memory_cost()
+                re = MemoryCostModel(strategy, global_batch_size=bsz, mbsz = mbsz_dict[strategy[0]], min_tp = min_tp, 
+                                     model_args=model_args, train_args=train_args, parallel_args=parallel_args, profile_model_args=profile_model_args).get_memory_cost()
                 re_total = re['enc_total']*layer_num/strategy[0]
                 print(form_strategy(strategy), re['enc_total'], re['other'], [re_total + re_other for re_other in re['other'][min_tp]])
                 memory[i].append(re['enc_total'])
@@ -648,14 +649,14 @@ class GalvatronSearchEngine():
                     other_time_cost[k] = [0] * strategy[0]
                     
                     comm_factor = 2 * (k - 1) / k * (mbsz_dict[strategy[0]] / min_tp * k)
-                    data_size = (self.timecost_model_args_list[0]["sequence_length"] * 
-                                self.timecost_model_args_list[0]["hidden_size"] * 2 * 4 / 1024 / 1024 / 1024)
+                    data_size = (self.model_args_list[0].seq_length * 
+                                self.model_args_list[0].hidden_size * 2 * 4 / 1024 / 1024 / 1024)
 
                     if k == 1 or k == n_gpu:
-                        comm_coe = self.timecost_model_args_list[0]['comm_coe_dict']['%d' % k]
+                        comm_coe = self.profile_hardware_args_list[0].comm_coe_dict['%d' % k]
                         other_time_cost[k][0] += comm_factor * data_size * comm_coe
                     else:
-                        comm_coe = self.timecost_model_args_list[0]['comm_coe_dict']['%d_0' % k]
+                        comm_coe = self.profile_hardware_args_list[0].comm_coe_dict['%d_0' % k]
                         other_time_cost[k][0] += comm_factor * data_size * comm_coe
                     if self.args.mixed_precision:
                         for t in range(strategy[0]):
@@ -676,7 +677,11 @@ class GalvatronSearchEngine():
                 # print(other_time_cost[1])
                 pipeline_cost = pipeline_costmodel(TimeCostModel,
                                                     self.layernum_list,
-                                                    [timecost_model_args],
+                                                    [model_args],
+                                                    [train_args],
+                                                    [parallel_args],
+                                                    [profile_model_args],
+                                                    [profile_hardware_args],
                                                     res,
                                                     pp_division_even(self.layernum_list, strategy[0]),
                                                     [chunk],
@@ -862,20 +867,30 @@ class GalvatronSearchEngine():
         print('Other Memory Cost (pp > 1):')
         print(self.other_memory_pp_on)
         print('================================================================================')
-        print('Time Cost Model Args:')
-        print(self.timecost_model_args_list)
+        print('Model Args List:')
+        print(self.model_args_list)
         print('================================================================================')
-        print('Memory Cost Model Args:')
-        print(self.memcost_model_args_list)
+        print('Train Args List:')
+        print(self.train_args_list)
+        print('================================================================================')
+        print('Parallel Args List:')
+        print(self.parallel_args_list)
+        print('================================================================================')
+        print('Profile Model Args List:')
+        print(self.profile_model_args_list)
+        print('================================================================================')
+        print('Profile Hardware Args List:')
+        print(self.profile_hardware_args_list)
         print('================================================================================')
 
 
 # ========================== Pipeline Division & Pipeline Cost Utils ==========================
-def pp_division_memory_balanced(memcost_model_args, layer_num, pp_deg, bsz, mbsz, strategies):
-    new_memcost_model_args = [copy.deepcopy(memcost_model_args[i]) for i in range(len(layer_num))]
-    for i in range(len(new_memcost_model_args)):
-        new_memcost_model_args[i]['pipeline_type'] = 'gpipe'
-    assert(len(memcost_model_args)==len(layer_num))
+def pp_division_memory_balanced(model_args_list, train_args_list, parallel_args_list, profile_model_args_list, layer_num, pp_deg, bsz, mbsz, strategies):
+    model_args_list, train_args_list= [copy.deepcopy(model_args_list[i]) for i in range(len(layer_num))], [copy.deepcopy(train_args_list[i]) for i in range(len(layer_num))]
+    parallel_args_list, profile_model_args_list = [copy.deepcopy(parallel_args_list[i]) for i in range(len(layer_num))], [copy.deepcopy(profile_model_args_list[i]) for i in range(len(layer_num))]
+    for i in range(len(parallel_args_list)):
+        parallel_args_list[i]['pipeline_type'] = 'gpipe'
+    assert(len(model_args_list) == len(layer_num) and len(train_args_list) == len(layer_num) and len(parallel_args_list) == len(layer_num) and len(profile_model_args_list) == len(layer_num))
     if pp_deg == 1:
         return [np.sum(layer_num)], None
     layer_type_num = len(layer_num)
@@ -885,18 +900,20 @@ def pp_division_memory_balanced(memcost_model_args, layer_num, pp_deg, bsz, mbsz
         return None, None
     gpu_num = strategies[0][0] * strategies[0][1] * strategies[0][2]
     for i in range(layer_type_num):
-        # memcosts = [MemoryCostModel(strategy, global_batch_size=bsz, **memcost_model_args[i]).get_memory_cost()['enc_total'] for strategy in strategies]
+        # memcosts = [MemoryCostModel(strategy, global_batch_size=bsz, model_args=model_args_list[i], train_args=train_args_list[i], parallel_args=parallel_args_list[i], profile_model_args=profile_model_args_list[i]).get_memory_cost()['enc_total'] for strategy in strategies]
         # layer_min_memcost.append(np.min(memcosts))
-        memcost = MemoryCostModel([pp_deg, 1, gpu_num//pp_deg, {}], global_batch_size=bsz, mbsz = mbsz, min_tp = 1, **new_memcost_model_args[i]).get_memory_cost()['enc_total']
+        memcost = MemoryCostModel([pp_deg, 1, gpu_num//pp_deg, {}], global_batch_size=bsz, mbsz = mbsz, min_tp = 1,
+                                  model_args=model_args_list[i], train_args=train_args_list[i], parallel_args=parallel_args_list[i], profile_model_args=profile_model_args_list[i]).get_memory_cost()['enc_total']
         layer_min_memcost.append(np.min(memcost))
-    other_cost = MemoryCostModel(strategies[0], global_batch_size=bsz, mbsz = mbsz, min_tp = 1, **new_memcost_model_args[0]).get_memory_cost()['other'][1]
+    other_cost = MemoryCostModel(strategies[0], global_batch_size=bsz, mbsz = mbsz, min_tp = 1, 
+                                 model_args=model_args_list[0], train_args=train_args_list[0], parallel_args=parallel_args_list[0], profile_model_args=profile_model_args_list[0]).get_memory_cost()['other'][1]
     # print(other_cost)
     # print(layer_min_memcost, other_cost)
     min_memcost_all_layers = []
     for i in range(layer_type_num):
-        min_memcost_all_layers += [layer_min_memcost[i]]*layer_num[i]
+        min_memcost_all_layers += [layer_min_memcost[i]] * layer_num[i]
     # print(min_memcost_all_layers)
-    avg_mem_cost = (np.sum(min_memcost_all_layers)+np.sum(other_cost))/pp_deg
+    avg_mem_cost = (np.sum(min_memcost_all_layers) + np.sum(other_cost)) / pp_deg
     # print(min_memcost_all_layers, other_cost)
     # print('Avg memcost:', avg_mem_cost)
 
@@ -945,14 +962,14 @@ def pp_division_memory_balanced(memcost_model_args, layer_num, pp_deg, bsz, mbsz
     # print(mem_cost_per_stage,mem_cost_per_stage_adjusted)
     return pp_divide, mem_cost_per_stage_adjusted
 
-def get_pp_stage_for_bsz(strategies, memcost_model_args_list, layer_num_list, bsz, mbsz_dict, single_layer_even=True):
+def get_pp_stage_for_bsz(strategies, model_args_list, train_args_list, parallel_args_list, profile_model_args_list, layer_num_list, bsz, mbsz_dict, single_layer_even=True):
     pp_stage_dict = dict()
     pp_deg_list = sorted(list(set([s[0] for s in strategies])))
     for pp_deg in pp_deg_list:
         if single_layer_even and len(layer_num_list) == 1:
             pp_divide = pp_division_even(layer_num_list, pp_deg)
         else:
-            pp_divide, mem_cost_per_stage = pp_division_memory_balanced(memcost_model_args_list, layer_num_list, pp_deg, bsz, mbsz_dict[pp_deg], strategies)
+            pp_divide, mem_cost_per_stage = pp_division_memory_balanced(model_args_list, train_args_list, parallel_args_list, profile_model_args_list, layer_num_list, pp_deg, bsz, mbsz_dict[pp_deg], strategies)
             #print(bsz, pp_deg, pp_divide, mem_cost_per_stage)
         pp_stage_dict[pp_deg] = pp_divide
     return pp_stage_dict
