@@ -48,6 +48,8 @@ def wrap_data_parallel(
     pp_on=False,
     wrap_block_name=None,
     wrap_other_block_name=None,
+    fine_wrap_block_name=None,
+    need_fine_wrap=None,
     tp_groups=None,
     all_block_name=None,
     load_module_func=None,
@@ -70,6 +72,8 @@ def wrap_data_parallel(
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
             wrap_other_block_name=wrap_other_block_name,
+            fine_wrap_block_name=fine_wrap_block_name,
+            need_fine_wrap=need_fine_wrap,
             tp_groups=tp_groups,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
@@ -99,6 +103,8 @@ def wrap_module_fsdp_manually(
     pp_on=False,
     wrap_block_name=None,
     wrap_other_block_name=None,
+    fine_wrap_block_name=None,
+    need_fine_wrap=None,
     tp_groups=None,
     all_block_name=None,
     load_module_func=None,
@@ -139,7 +145,10 @@ def wrap_module_fsdp_manually(
     # Wrap given block
     if wrap_block_name is not None:
         if "enc" in module_type or "dec" in module_type:
-            module = apply_fsdp(module, fsdp_args, wrap_block_name)
+            if fine_wrap_block_name is not None and need_fine_wrap:
+                module = apply_fsdp(module, fsdp_args, fine_wrap_block_name)
+            else:
+                module = apply_fsdp(module, fsdp_args, wrap_block_name)
         else:
             module = apply_fsdp(module, fsdp_args, wrap_other_block_name)
             # if not ('initialize_on_meta' in args and args.initialize_on_meta):
@@ -226,7 +235,7 @@ def apply_ckpt(model, checkpoint_wrapper_fn, wrap_block_name):
     return model
 
 
-def wrap_modules_checkpoint(module_list, checkpoint_flags, wrap_block_name=None):
+def wrap_modules_checkpoint(module_list, checkpoint_flags, wrap_block_name=None, fine_wrap_block_name=None, need_fine_wrap=None):
     m = module_list
     if isinstance(m, FSDP):
         m = m._fsdp_wrapped_module
@@ -234,7 +243,10 @@ def wrap_modules_checkpoint(module_list, checkpoint_flags, wrap_block_name=None)
     for i in range(len(m)):
         if checkpoint_flags[i]:
             if wrap_block_name is not None:
-                m[i] = apply_ckpt(m[i], checkpoint_wrapper, wrap_block_name)
+                if fine_wrap_block_name is not None and need_fine_wrap[i]:
+                    m[i] = apply_ckpt(m[i], checkpoint_wrapper, fine_wrap_block_name[1:]) # only warp mlp
+                else:
+                    m[i] = apply_ckpt(m[i], checkpoint_wrapper, wrap_block_name)
             else:
                 m[i] = checkpoint_wrapper(m[i])
     return module_list
@@ -304,6 +316,8 @@ def wrap_modules_data_parallel(
     default_process_group=None,
     wrap_block_name=None,
     wrap_other_block_name=None,
+    fine_wrap_block_name=None,
+    need_fine_wrap=None,
     tp_groups=None,
     all_block_name=None,
     load_module_func=None,
@@ -332,6 +346,8 @@ def wrap_modules_data_parallel(
             pp_on=pp_on,
             wrap_block_name=wrap_block_name,
             wrap_other_block_name=wrap_other_block_name,
+            fine_wrap_block_name=fine_wrap_block_name,
+            need_fine_wrap=need_fine_wrap[i],
             tp_groups=tp_groups[i],
             all_block_name=all_block_name,
             load_module_func=load_module_func,

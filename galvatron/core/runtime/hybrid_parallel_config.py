@@ -210,7 +210,7 @@ def check_hp_config(hp_configs, layernum_list):
     for pp_rank in pp_ranks_enc:
         assert pp_rank >= 0 and pp_rank <= pp_deg - 1, "Wrong pp_rank!"
     for ckpt in checkpoint_flags_enc:
-        assert ckpt == 0 or ckpt == 1, "Wrong checkpoint_flag!"
+        assert ckpt == 0 or ckpt == 1 or ckpt == 2, "Wrong checkpoint_flag!"
 
 
 def print_hp_config(key, val):

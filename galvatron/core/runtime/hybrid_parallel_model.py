@@ -157,6 +157,7 @@ def construct_hybrid_parallel_model_api(
     wrap_block_name=None,
     wrap_checkpoint_block_name=None,
     wrap_other_block_name=None,
+    fine_wrap_block_name=None,
     tied_wte_attr_names=None,
     layernorm_name=[],
     all_block_name=None,
@@ -266,6 +267,8 @@ def construct_hybrid_parallel_model_api(
         mixed_precision=mixed_precision_dtype(args.mixed_precision),
         wrap_block_name=wrap_block_name,
         wrap_other_block_name=wrap_other_block_name,
+        fine_wrap_block_name=fine_wrap_block_name,
+        need_fine_wrap=[True if x==2 else False for x in hp_configs_whole["checkpoint_flags_whole"]],
         tp_groups=tp_groups_whole,
         all_block_name=all_block_name,
         load_module_func=load_module_func,
@@ -281,7 +284,10 @@ def construct_hybrid_parallel_model_api(
 
     # [Step 6] Wrap checkpoint based on checkpoint_flags
     hp_model.wrap_pipeline_modules_checkpoint(
-        hp_configs_whole["checkpoint_flags_whole"], wrap_block_name=wrap_checkpoint_block_name
+        hp_configs_whole["checkpoint_flags_whole"], 
+        wrap_block_name=wrap_checkpoint_block_name, 
+        fine_wrap_block_name=fine_wrap_block_name,
+        need_fine_wrap=[True if x==2 else False for x in hp_configs_whole["checkpoint_flags_whole"]],
     )
 
     model = GalvatronModel(hp_model)

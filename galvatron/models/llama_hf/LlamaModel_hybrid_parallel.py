@@ -14,7 +14,7 @@ from galvatron.models.llama_hf.LlamaModel_sequential import (
     LlamaPreNorm_,
     construct_sequential_model,
 )
-from galvatron.models.llama_hf.LlamaModel_tensor_parallel import LlamaLayer_tp, construct_tensor_parallel_model
+from galvatron.models.llama_hf.LlamaModel_tensor_parallel import LlamaLayer_tp, LlamaAttention_tp, LlamaMLP_tp, construct_tensor_parallel_model
 from galvatron.models.llama_hf.meta_configs import config_from_meta, model_layer_configs, model_name, set_model_config
 
 # from megatron.legacy.model.rms_norm import RMSNorm as LlamaRMSNorm
@@ -28,6 +28,7 @@ def get_hybrid_parallel_configs(model_config, training_args):
 def construct_hybrid_parallel_model(model, model_config, training_args, hybrid_parallel_configs):
     wrap_block_name = [LlamaLayer_tp]
     wrap_checkpoint_block_name = [LlamaLayer_tp]
+    fine_wrap_block_name = [LlamaAttention_tp, LlamaMLP_tp]
     wrap_other_block_name = [LlamaEmbeddings_, LlamaPreNorm_, LlamaCls_]
     all_block_name = [LlamaEmbeddings_, LlamaLayer_tp, LlamaPreNorm_, LlamaCls_]
     hp_model = construct_hybrid_parallel_model_api(
@@ -41,6 +42,7 @@ def construct_hybrid_parallel_model(model, model_config, training_args, hybrid_p
         wrap_block_name=wrap_block_name,
         wrap_checkpoint_block_name=wrap_checkpoint_block_name,
         wrap_other_block_name=wrap_other_block_name,
+        fine_wrap_block_name=fine_wrap_block_name,
         # tied_wte_attr_names=['embed_tokens', 'lm_head'],
         layernorm_name=["LayerNorm", "norm"],
         all_block_name=all_block_name,

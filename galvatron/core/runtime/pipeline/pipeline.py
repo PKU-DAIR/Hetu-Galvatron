@@ -177,6 +177,8 @@ class PipelineParallel(nn.Module):
         mixed_precision=torch.bfloat16,
         wrap_block_name=None,
         wrap_other_block_name=None,
+        fine_wrap_block_name=None,
+        need_fine_wrap=None,
         tp_groups=None,
         all_block_name=None,
         load_module_func=None,
@@ -189,6 +191,7 @@ class PipelineParallel(nn.Module):
         dp_groups_cur_stage = dp_groups[self.stage_start_idx : self.stage_end_idx]
         pp_devices_cur_stage = [self.local_rank] * (self.stage_end_idx - self.stage_start_idx)
         tp_groups_cur_stage = tp_groups[self.stage_start_idx : self.stage_end_idx]
+        need_fine_wrap_cur_stage = need_fine_wrap[self.stage_start_idx : self.stage_end_idx]
         default_process_group = dp_groups[0]
         self.model_cur_stage = wrap_modules_data_parallel(
             module_list=self.model_cur_stage,
@@ -200,6 +203,8 @@ class PipelineParallel(nn.Module):
             default_process_group=default_process_group,
             wrap_block_name=wrap_block_name,
             wrap_other_block_name=wrap_other_block_name,
+            fine_wrap_block_name=fine_wrap_block_name,
+            need_fine_wrap=need_fine_wrap_cur_stage,
             tp_groups=tp_groups_cur_stage,
             all_block_name=all_block_name,
             load_module_func=load_module_func,
@@ -208,12 +213,13 @@ class PipelineParallel(nn.Module):
         if self.finalize_wte_grads:
             self.sync_embedding()
 
-    def wrap_pipeline_modules_checkpoint(self, checkpoint_flags, wrap_block_name=None):
+    def wrap_pipeline_modules_checkpoint(self, checkpoint_flags, wrap_block_name=None, fine_wrap_block_name=None, need_fine_wrap=None):
         self.checkpoint_flags_stage = checkpoint_flags[self.stage_start_idx : self.stage_end_idx]
+        need_fine_wrap_cur_stage = need_fine_wrap[self.stage_start_idx : self.stage_end_idx]
         if np.sum(checkpoint_flags) > 0:
             assert self.total_model_len == len(checkpoint_flags)
             self.model_cur_stage = wrap_modules_checkpoint(
-                self.model_cur_stage, self.checkpoint_flags_stage, wrap_block_name=wrap_block_name
+                self.model_cur_stage, self.checkpoint_flags_stage, wrap_block_name=wrap_block_name, fine_wrap_block_name=fine_wrap_block_name, need_fine_wrap=need_fine_wrap_cur_stage
             )
             if wrap_block_name is not None:  # in this way, checkpoint will be warpped inside FSDP
                 self.checkpoint_flags_stage = [0] * (self.stage_end_idx - self.stage_start_idx)
