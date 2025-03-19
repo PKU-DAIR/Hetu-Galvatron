@@ -8,7 +8,6 @@ from logging import getLogger
 from typing import Callable, Dict, List, Optional, Tuple
 
 import torch
-from apex.optimizers import FusedAdam as Adam
 
 from .. import parallel_state, tensor_parallel
 from ..dist_checkpointing import ShardedTensor
@@ -394,6 +393,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             optimizer, config, grad_scaler, init_state_fn,
         )
 
+        from apex.optimizers import FusedAdam as Adam
         assert isinstance(
             optimizer, Adam
         ), "Only Adam currently supported, due to checkpointing requirements."

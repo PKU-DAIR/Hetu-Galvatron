@@ -5,9 +5,7 @@
 import os
 from typing import List, Optional, Union
 
-import amp_C
 import torch
-from apex.multi_tensor_apply import multi_tensor_applier
 from torch import inf
 
 from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
@@ -77,6 +75,8 @@ def clip_grad_norm_fp32(
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
             if grads_for_norm:
+                import amp_C
+                from apex.multi_tensor_apply import multi_tensor_applier
                 grad_norm, _ = multi_tensor_applier(
                     amp_C.multi_tensor_l2norm,
                     dummy_overflow_buf,
@@ -104,6 +104,8 @@ def clip_grad_norm_fp32(
     clip_coeff = max_norm / (total_norm + 1.0e-6)
     if clip_coeff < 1.0:
         dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+        import amp_C
+        from apex.multi_tensor_apply import multi_tensor_applier
         multi_tensor_applier(
             amp_C.multi_tensor_scale, dummy_overflow_buf, [grads, grads], clip_coeff
         )

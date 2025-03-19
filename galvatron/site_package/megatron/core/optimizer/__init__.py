@@ -3,8 +3,6 @@ from logging import getLogger
 from typing import Callable, Dict, List, Optional
 
 import torch
-from apex.optimizers import FusedAdam as Adam
-from apex.optimizers import FusedSGD as SGD
 
 from megatron.core import mpu
 
@@ -173,6 +171,7 @@ def _get_megatron_optimizer_based_on_param_groups(
         Instance of MegatronOptimizer.
     """
     if config.optimizer == 'adam':
+        from apex.optimizers import FusedAdam as Adam
         optimizer = Adam(
             param_groups,
             lr=config.lr,
@@ -189,6 +188,7 @@ def _get_megatron_optimizer_based_on_param_groups(
                         opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
 
     elif config.optimizer == 'sgd':
+        from apex.optimizers import FusedSGD as SGD
         optimizer = SGD(
             param_groups,
             lr=config.lr,

@@ -10,7 +10,7 @@ import torch
 from typing import Tuple, List
 from functools import partial
 from galvatron.core.redistribute import fused_split_allgather
-from .utils import rgetattr, rsetattr, rhasattr
+# from .utils import rgetattr, rsetattr, rhasattr
 
 from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 import collections

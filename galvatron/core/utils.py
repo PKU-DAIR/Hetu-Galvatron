@@ -121,11 +121,10 @@ def clip_grad_norm(model, max_norm, norm_type=2):
 
     return total_norm
 
-# from torch.optim import Adam
-from apex.optimizers import FusedAdam as Adam
-from megatron.training.training import get_optimizer_param_scheduler
-
 def get_optimizer_and_param_scheduler(model, args):
+    # from torch.optim import Adam
+    from apex.optimizers import FusedAdam as Adam
+    from megatron.training.training import get_optimizer_param_scheduler
 
     optimizer = Adam(model.parameters(), lr=args.lr, weight_decay=args.adam_weight_decay, betas=(args.adam_beta1, args.adam_beta2), eps=args.adam_eps)
     
