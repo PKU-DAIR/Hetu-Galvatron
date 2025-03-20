@@ -87,7 +87,10 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
     else:
         file_path = os.path.join(load, layer_name % module.idx)
         checkpoint = torch.load(file_path, mmap=True, map_location="cpu")
-        if name.startswith("attention"):
+        category = getattr(module, "category", None)
+        if torch.cuda.current_device() == 0:
+            print(file_path, module, category)
+        if name.startswith("attention") or category == "attention":
             if name.endswith("LayerNorm"):
                 weight = checkpoint["input_layernorm.weight"].to(device="cuda", dtype=torch.float32)
                 submodule.weight.copy_(weight)
@@ -119,7 +122,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
                     weight.shape[1], rank, world_size
                 )
                 submodule.weight.copy_(weight[:, weight_start_index:weight_end_index].contiguous())
-        elif name.startswith("mlp"):
+        elif name.startswith("mlp") or category == "mlp":
             if name.endswith("LayerNorm"):
                 weight = checkpoint["post_attention_layernorm.weight"].to(device="cuda", dtype=torch.float32)
                 submodule.weight.copy_(weight)

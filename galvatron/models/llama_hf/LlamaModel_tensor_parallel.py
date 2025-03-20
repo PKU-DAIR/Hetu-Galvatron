@@ -16,6 +16,8 @@ class LlamaAttention_tp(nn.Module):
     def __init__(self, config, layer_number, tp_group=None, sp_group=None):
         super().__init__()
         args = get_args()
+        self.idx = layer_number
+        self.category = "attention"
         self.sequence_parallel = args.sequence_parallel
         self.use_ulysses = sp_group.size > 1
         megatron_config = core_transformer_config_from_args(args)
@@ -63,11 +65,13 @@ class LlamaAttention_tp(nn.Module):
 
 
 class LlamaMLP_tp(nn.Module):
-    def __init__(self, config, tp_group=None):
+    def __init__(self, config, layer_number, tp_group=None):
         super().__init__()
         megatron_config = core_transformer_config_from_args(get_args())
         self.tp_group = tp_group.group if tp_group is not None else None
         self.mlp = ParallelMLP(megatron_config, tp_group=self.tp_group)
+        self.idx = layer_number
+        self.category = "mlp"
         self.LayerNorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(self, hidden_states):
@@ -82,7 +86,7 @@ class LlamaLayer_tp(nn.Module):
     def __init__(self, config, layer_number, tp_group=None, sp_group=None):
         super().__init__()
         self.attention = LlamaAttention_tp(config, layer_number, tp_group, sp_group)
-        self.mlp = LlamaMLP_tp(config, tp_group)
+        self.mlp = LlamaMLP_tp(config, layer_number, tp_group)
         self.idx = layer_number
 
     def forward(
