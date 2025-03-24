@@ -297,7 +297,9 @@ class GalvatronSearchEngine():
                     'optimal_chunk_func': self.optimal_chunk_func,
                     'sequence_length': self.seqlen_list[i],
                     'hidden_size': self.hiddensize_list[i],
-                    'vocab_size': self.args.padded_vocab_size if hasattr(self.args, 'padded_vocab_size') else self.args.num_classes, # For Swin model
+                    'vocab_size': self.args.padded_vocab_size if hasattr(self.args, 'padded_vocab_size') 
+                                  else (self.args.num_labels if hasattr(self.args, 'num_labels')  # For ViT
+                                  else self.args.num_classes),  # For Swin
                     'forward_computation_time': self.time_profiled_list[i],
                     'bct_fct_coe': 2,
                     'extra_overhead': 0,
