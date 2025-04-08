@@ -138,8 +138,8 @@ function ConfigPanel({ config, onConfigChange }) {
         label={`${getText('mixedPrecision', language)}: ${config.mixed_precision ? getText('enabled', language) : getText('disabled', language)}`}
         color={config.mixed_precision ? "success" : "default"}
         variant="outlined"
-        onClick={() => handleChange('mixed_precision', !config.mixed_precision)}
-        sx={{ cursor: 'pointer' }}
+        // onClick={() => handleChange('mixed_precision', !config.mixed_precision)}
+        // sx={{ cursor: 'pointer' }}
       />
     </Box>
   );
