@@ -390,6 +390,10 @@ const translations = {
     [LANGUAGES.ZH]: '团队',
     [LANGUAGES.EN]: 'Team'
   },
+  showDetails: {
+    [LANGUAGES.ZH]: '显示细节',
+    [LANGUAGES.EN]: 'Show Details'
+  },
 };
 
 /**

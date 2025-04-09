@@ -1,7 +1,7 @@
 // src/components/MemoryTreemap.js
 import React, { useEffect, useState } from 'react';
 import { Treemap, ResponsiveContainer, Tooltip } from 'recharts';
-import { Box, Typography, Paper, Divider } from '@mui/material';
+import { Box, Typography, Paper, Divider, Chip, Switch, FormControlLabel } from '@mui/material';
 import { useLanguage, LANGUAGES } from '../context/LanguageContext';
 import { getText } from '../utils/translations';
 
@@ -49,7 +49,7 @@ const createBlockStyles = (language) => ({
 });
   
 // Format memory data for treemap visualization
-const formatMemoryData = (memoryData, config, language) => {
+const formatMemoryData = (memoryData, config, language, showDetails) => {
   if (!memoryData) return [];
   
   // Get block styles with current language
@@ -79,66 +79,67 @@ const formatMemoryData = (memoryData, config, language) => {
   const displayLayers = numLayers;
   const activationPerLayer = memoryData.per_layer_activation;
   
-  // Allocate memory for each layer
-  for (let i = 0; i < displayLayers; i++) {
-    const layerNode = {
-      name: 'Layer',
-      label: `L`,
-      fullName: `Layer ${i+1} Activation`,
-      value: activationPerLayer,
-      children: []
-    };
-    
-    // TODO: Allocate memory within each layer for attention, ffn, and layer norm
-    // const attnValue = activationPerLayer * 0.5;
-    // const ffnValue = activationPerLayer * 0.4;
-    // const lnValue = activationPerLayer * 0.1;
-    
-    // // Add components to each layer
-    // layerNode.children.push({ 
-    //   name: 'A', 
-    //   label: 'A', 
-    //   fullName: 'Attention',
-    //   value: attnValue
-    // });
-    
-    // layerNode.children.push({ 
-    //   name: 'F', 
-    //   label: 'F', 
-    //   fullName: 'FFN',
-    //   value: ffnValue
-    // });
-    
-    // layerNode.children.push({ 
-    //   name: 'L', 
-    //   label: 'L', 
-    //   fullName: 'LayerNorm',
-    //   value: lnValue
-    // });
-    
-    activationNode.children.push(layerNode);
-  }
+  if (showDetails) {
+    // Allocate memory for each layer
+    for (let i = 0; i < displayLayers; i++) {
+      const layerNode = {
+        name: 'Layer',
+        label: `L`,
+        fullName: `Layer ${i+1} Activation`,
+        value: activationPerLayer,
+        children: []
+      };
+      // TODO: Allocate memory within each layer for attention, ffn, and layer norm
+      // const attnValue = activationPerLayer * 0.5;
+      // const ffnValue = activationPerLayer * 0.4;
+      // const lnValue = activationPerLayer * 0.1;
+      
+      // // Add components to each layer
+      // layerNode.children.push({ 
+      //   name: 'A', 
+      //   label: 'A', 
+      //   fullName: 'Attention',
+      //   value: attnValue
+      // });
+      
+      // layerNode.children.push({ 
+      //   name: 'F', 
+      //   label: 'F', 
+      //   fullName: 'FFN',
+      //   value: ffnValue
+      // });
+      
+      // layerNode.children.push({ 
+      //   name: 'L', 
+      //   label: 'L', 
+      //   fullName: 'LayerNorm',
+      //   value: lnValue
+      // });
+      
+      activationNode.children.push(layerNode);
+    }
 
-  // Add pp activation nodes for pipeline parallel stages
-  for (let i = 0; i < config.pp_size - memoryData.stage_idx - 1; i++) {
-    const ppActNode = {
-      name: 'PP Activation',
-      label: `PP`,
-      fullName: `PP Activation`,
-      value: memoryData.per_layer_activation * memoryData.num_layers,
-      children: []
-    };
+    // Add pp activation nodes for pipeline parallel stages
+    for (let i = 0; i < config.pp_size - memoryData.stage_idx - 1; i++) {
+      const ppActNode = {
+        name: 'PP Activation',
+        label: `PP`,
+        fullName: `PP Activation`,
+        value: memoryData.per_layer_activation * memoryData.num_layers,
+        children: []
+      };
+      
+      activationNode.children.push(ppActNode);
+    }
     
-    activationNode.children.push(ppActNode);
+    // Add context and projection area
+    activationNode.children.push({
+      name: 'Other',
+      label: 'O',
+      fullName: 'Other Memory Activation',
+      value: memoryData.other_memory_activation
+    });
   }
-  
-  // Add context and projection area
-  activationNode.children.push({
-    name: 'Other',
-    label: 'O',
-    fullName: 'Other Memory Activation',
-    value: memoryData.other_memory_activation
-  });
   
   // 2. Add parameter memory section (combine parameters, gradients, and optimizer)
   const parameterNode = {
@@ -147,7 +148,11 @@ const formatMemoryData = (memoryData, config, language) => {
     displayLabel: BLOCK_STYLES['Model States'].label,
     value: memoryData.model_states,
     isMainNode: true,
-    children: [
+    children: []
+  };
+  
+  if (showDetails) {
+    parameterNode.children = [
       {
         name: 'Parameters',
         label: 'P',
@@ -172,8 +177,8 @@ const formatMemoryData = (memoryData, config, language) => {
         fullName: 'Grad Accumulate (FP32)',
         value: memoryData.grad_accumulate
       }
-    ]
-  };
+    ];
+  }
   
   // Add main nodes to root
   rootData.children.push(activationNode);
@@ -477,15 +482,17 @@ const CustomTooltip = ({ active, payload, language }) => {
   return null;
 };
 
+// Main component for memory visualization using treemap
 function MemoryTreemap({ memoryData, config, error }) {
   const { language } = useLanguage();
   const [data, setData] = useState([]);
   const [hoveredNode, setHoveredNode] = useState(null);
   const [aspectRatio, setAspectRatio] = useState(4/3);
+  const [showDetails, setShowDetails] = useState(false);
   
   useEffect(() => {
     if (memoryData) {
-      const formattedData = formatMemoryData(memoryData, config, language);
+      const formattedData = formatMemoryData(memoryData, config, language, showDetails);
       // console.log('Formatted treemap data:', formattedData);
       setData(formattedData);
       
@@ -494,10 +501,15 @@ function MemoryTreemap({ memoryData, config, error }) {
       // console.log('Calculated optimal aspect ratio:', bestRatio);
       setAspectRatio(bestRatio);
     }
-  }, [memoryData, config, language]);
+  }, [memoryData, config, language, showDetails]);
   
   const handleHover = (node) => {
     setHoveredNode(node);
+  };
+  
+  // Handle detail toggle
+  const handleDetailToggle = (event) => {
+    setShowDetails(event.target.checked);
   };
   
   // Display message when no data is available or there's an error
@@ -557,9 +569,21 @@ function MemoryTreemap({ memoryData, config, error }) {
         <Typography variant="h6" sx={{ fontWeight: 'bold', color: '#333', fontFamily: 'Arial Black, Arial Bold, sans-serif' }}>
           {getText('memoryVisTitle', language)}
         </Typography>
-        <Typography variant="subtitle1" sx={{ color: '#1976d2', fontWeight: 'bold', fontFamily: 'Arial Black, Arial Bold, sans-serif' }}>
-          {getText('totalMemory', language)} {memoryData.total.toFixed(2)} MB
-        </Typography>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+          <FormControlLabel
+            control={
+              <Switch 
+                checked={showDetails}
+                onChange={handleDetailToggle}
+                color="primary"
+              />
+            }
+            label={getText('showDetails', language)}
+          />
+          <Typography variant="subtitle1" sx={{ color: '#1976d2', fontWeight: 'bold', fontFamily: 'Arial Black, Arial Bold, sans-serif' }}>
+            {getText('totalMemory', language)} {memoryData.total.toFixed(2)} MB
+          </Typography>
+        </Box>
       </Box>
       
       <Divider sx={{ mb: 3 }} />
