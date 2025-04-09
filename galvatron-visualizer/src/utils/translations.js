@@ -372,6 +372,24 @@ const translations = {
     [LANGUAGES.ZH]: '点击"模型状态"扇区查看详细内存分布',
     [LANGUAGES.EN]: 'Click on "Model States" segment to see detailed breakdown'
   },
+  
+  // 底部链接
+  githubLink: {
+    [LANGUAGES.ZH]: 'GitHub 仓库',
+    [LANGUAGES.EN]: 'GitHub Repository'
+  },
+  documentationLink: {
+    [LANGUAGES.ZH]: '技术文档',
+    [LANGUAGES.EN]: 'Documentation'
+  },
+  basedOnModel: {
+    [LANGUAGES.ZH]: '基于 Galvatron 内存成本模型 | 数据仅供参考',
+    [LANGUAGES.EN]: 'Based on Galvatron Memory Cost Model | Data for reference only'
+  },
+  teamCopyright: {
+    [LANGUAGES.ZH]: '团队',
+    [LANGUAGES.EN]: 'Team'
+  },
 };
 
 /**

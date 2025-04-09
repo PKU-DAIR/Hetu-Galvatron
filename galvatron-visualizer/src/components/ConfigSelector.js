@@ -57,7 +57,7 @@ function ConfigSelector({ onConfigLoaded }) {
         return response.json();
       })
       .then(data => {
-        console.log("Loaded config data from server:", data);
+        // console.log("Loaded config data from server:", data);
         
         // Convert keys to integers
         const processedData = convertKeysToInt(data);
@@ -109,7 +109,7 @@ function ConfigSelector({ onConfigLoaded }) {
     reader.onload = (e) => {
       try {
         const content = JSON.parse(e.target.result);
-        console.log("File content read:", content);
+        // console.log("File content read:", content);
         
         // Convert keys to integers
         const processedData = convertKeysToInt(content);

@@ -87,21 +87,21 @@ const AppContent = () => {
       
       // Update config
       setConfig(newConfig);
-      console.log("Parameters extracted from config file:", newConfig);
+      // console.log("Parameters extracted from config file:", newConfig);
     }
   };
   
   // Recalculate memory when config changes
   useEffect(() => {
     try {
-      console.log("Recalculating memory based on config:", config);
+      // console.log("Recalculating memory based on config:", config);
       // Clear previous errors
       setMemoryError(null);
       
       // Pass raw config data to MemoryCostModel as second parameter
       const memoryModel = new MemoryCostModel(config, rawConfigData);
       const results = memoryModel.getMemoryCost();
-      console.log("Memory calculation results:", results);
+      // console.log("Memory calculation results:", results);
       
       setMemoryResults(results);
     } catch (error) {
@@ -116,7 +116,7 @@ const AppContent = () => {
   }, [config, rawConfigData]);
   
   const handleConfigChange = (newConfig) => {
-    console.log("Configuration changed:", newConfig);
+    // console.log("Configuration changed:", newConfig);
     setConfig(newConfig);
   };
   
@@ -173,12 +173,66 @@ const AppContent = () => {
           {/* Footer */}
           <Box sx={{ mt: 4, textAlign: 'center', color: 'text.secondary' }}>
             <Typography variant="body2">
-              {language === LANGUAGES.ZH 
-                ? '基于 Galvatron 内存成本模型 | 数据仅供参考'
-                : 'Based on Galvatron Memory Cost Model | Data for reference only'}
+              {getText('basedOnModel', language)}
             </Typography>
+            
+            {/* 添加GitHub和文档链接 */}
+            <Box sx={{ 
+              display: 'flex', 
+              justifyContent: 'center', 
+              gap: 3, 
+              mt: 1, 
+              mb: 1 
+            }}>
+              <Typography 
+                variant="body2" 
+                component="a" 
+                href="https://github.com/PKU-DAIR/Hetu-Galvatron" 
+                target="_blank"
+                rel="noopener noreferrer"
+                sx={{ 
+                  color: 'primary.main', 
+                  textDecoration: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.5,
+                  '&:hover': { textDecoration: 'underline' }
+                }}
+              >
+                <Box 
+                  component="img" 
+                  src="https://github.githubassets.com/favicons/favicon.svg" 
+                  sx={{ width: 16, height: 16 }} 
+                />
+                {getText('githubLink', language)}
+              </Typography>
+              
+              <Typography 
+                variant="body2" 
+                component="a" 
+                href="https://hetu-galvatron.readthedocs.io/" 
+                target="_blank"
+                rel="noopener noreferrer"
+                sx={{ 
+                  color: 'primary.main', 
+                  textDecoration: 'none',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 0.5,
+                  '&:hover': { textDecoration: 'underline' }
+                }}
+              >
+                <Box 
+                  component="img" 
+                  src="https://readthedocs.org/favicon.ico" 
+                  sx={{ width: 16, height: 16 }} 
+                />
+                {getText('documentationLink', language)}
+              </Typography>
+            </Box>
+            
             <Typography variant="body2">
-              © {new Date().getFullYear()} Galvatron {language === LANGUAGES.ZH ? '团队' : 'Team'}
+              © {new Date().getFullYear()} Galvatron {getText('teamCopyright', language)}
             </Typography>
           </Box>
         </Box>

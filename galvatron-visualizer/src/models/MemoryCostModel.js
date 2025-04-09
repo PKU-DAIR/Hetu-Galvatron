@@ -60,7 +60,7 @@ export default class MemoryCostModel {
       
       // Parse raw config if available
       if (this.rawConfig) {
-        console.log("rawConfig:", this.rawConfig);
+        // console.log("rawConfig:", this.rawConfig);
         this.parseRawConfig();
       }
       
@@ -88,7 +88,7 @@ export default class MemoryCostModel {
         throw new Error("Missing required raw configuration data. Please upload a Galvatron config file.");
       }
       
-      console.log("Parsing raw config data...");
+     // console.log("Parsing raw config data...");
       
       // Extract model config information
       if (!this.rawConfig.model_config) {
@@ -104,13 +104,13 @@ export default class MemoryCostModel {
       // this.num_layers = modelConfig.n_layers || this.num_layers;
       this.vocab_size = modelConfig.vocab_size || this.vocab_size;
       
-      console.log("Model parameters extracted from config:", {
-        attention_heads: this.attention_heads,
-        hidden_dim: this.hidden_dim,
-        ff_dim: this.ff_dim,
-        //num_layers: this.num_layers,
-        vocab_size: this.vocab_size
-      });
+      // console.log("Model parameters extracted from config:", {
+      //   attention_heads: this.attention_heads,
+      //   hidden_dim: this.hidden_dim,
+      //   ff_dim: this.ff_dim,
+      //   //num_layers: this.num_layers,
+      //   vocab_size: this.vocab_size
+      // });
       
       // Extract sequence length information
       const seqLengths = [];
@@ -201,25 +201,26 @@ export default class MemoryCostModel {
       this.other_activation_size_pp_on_last = this.rawConfig[other_layer_type_pp_on_last][seqLengths[seqLengths.length - 1]].activation;
       
       // Scale activation sizes based on sequence length
+      // Exclude backward memroy (estimate) TODO: Find a more precise approach
       for (const key in this.other_activation_size_pp_off) {
-        this.other_activation_size_pp_off[key] = this.other_activation_size_pp_off[key] * this.seq_length / seqLengths[seqLengths.length - 1];
+        this.other_activation_size_pp_off[key] = this.other_activation_size_pp_off[key] * this.seq_length / seqLengths[seqLengths.length - 1] * 2/3;
       }
       for (const key in this.other_activation_size_pp_on_first) {
         this.other_activation_size_pp_on_first[key] = this.other_activation_size_pp_on_first[key] * this.seq_length / seqLengths[seqLengths.length - 1];
       }
       for (const key in this.other_activation_size_pp_on_last) {
-        this.other_activation_size_pp_on_last[key] = this.other_activation_size_pp_on_last[key] * this.seq_length / seqLengths[seqLengths.length - 1];
+        this.other_activation_size_pp_on_last[key] = this.other_activation_size_pp_on_last[key] * this.seq_length / seqLengths[seqLengths.length - 1] * 1/2;
       }
 
-      console.log("Model parameters extracted from config:", this.parameter_size, "MiB");
-      console.log("Other parameters extracted from config:", this.other_parameter_size_pp_off, "MiB");
-      console.log("Other parameters extracted from config:", this.other_parameter_size_pp_on_first, "MiB");
-      console.log("Other parameters extracted from config:", this.other_parameter_size_pp_on_last, "MiB");
+      // console.log("Model parameters extracted from config:", this.parameter_size, "MiB");
+      // console.log("Other parameters extracted from config:", this.other_parameter_size_pp_off, "MiB");
+      // console.log("Other parameters extracted from config:", this.other_parameter_size_pp_on_first, "MiB");
+      // console.log("Other parameters extracted from config:", this.other_parameter_size_pp_on_last, "MiB");
 
-      console.log("Activation sizes extracted from config:", this.tp_activation_per_bsz_dict, "MiB");
-      console.log("Other activation sizes extracted from config:", this.other_activation_size_pp_off, "MiB");
-      console.log("Other activation sizes extracted from config:", this.other_activation_size_pp_on_first, "MiB");
-      console.log("Other activation sizes extracted from config:", this.other_activation_size_pp_on_last, "MiB");
+      // console.log("Activation sizes extracted from config:", this.tp_activation_per_bsz_dict, "MiB");
+      // console.log("Other activation sizes extracted from config:", this.other_activation_size_pp_off, "MiB");
+      // console.log("Other activation sizes extracted from config:", this.other_activation_size_pp_on_first, "MiB");
+      // console.log("Other activation sizes extracted from config:", this.other_activation_size_pp_on_last, "MiB");
     }
     
     // Initialize method (corresponds to Python cost_model.py's initialize method)
@@ -266,7 +267,7 @@ export default class MemoryCostModel {
         this.parameter_size = this.parameter_size / this.tp_size;
       }
       
-      console.log(`Estimated single layer parameter size (FP32): ${this.parameter_size} MiB`);
+      // console.log(`Estimated single layer parameter size (FP32): ${this.parameter_size} MiB`);
     }
     
     // Estimate model states size (corresponds to Python version's estimate_model_states_size)
@@ -296,7 +297,7 @@ export default class MemoryCostModel {
       }
       
       this.model_states_size = model_states_size;
-      console.log(`Estimated model states size: ${this.model_states_size} MiB`);
+      // console.log(`Estimated model states size: ${this.model_states_size} MiB`);
 
       if (!this.mixed_precision) {
         this.param_mem = this.parameter_size;
@@ -323,7 +324,7 @@ export default class MemoryCostModel {
     
       if (this.chunks > 1 && this.zero_stage <= 1) this.grad_mem = 0;
 
-      console.log("debug,grad_mem",this.grad_mem,this.grad_accumulate_mem,this.optimizer_mem,this.param_mem);
+      // console.log("debug,grad_mem",this.grad_mem,this.grad_accumulate_mem,this.optimizer_mem,this.param_mem);
 
       if (Math.abs(this.grad_mem + this.grad_accumulate_mem + this.optimizer_mem + this.param_mem - this.model_states_size) > 1e-6) {
         throw new Error("Memory calculation error!" + 
@@ -345,7 +346,7 @@ export default class MemoryCostModel {
         this.activation_size = this.tp_activation_per_bsz_dict[this.tp_size] * this.micro_batch_size;
       }
 
-      console.log(`Estimated activation size: ${this.activation_size} MiB`);
+      // console.log(`Estimated activation size: ${this.activation_size} MiB`);
     }
     
     estimateOtherMemoryModelStatesSize() {
@@ -385,7 +386,7 @@ export default class MemoryCostModel {
       }
       
       this.other_memory_model_states = other_memory_model_states;
-      console.log(`Estimated other state size: ${this.other_memory_model_states} MiB`);
+      // console.log(`Estimated other state size: ${this.other_memory_model_states} MiB`);
 
       
       if (!this.mixed_precision) {
@@ -459,14 +460,14 @@ export default class MemoryCostModel {
       this.activation_percentage = (this.total_activation / total) * 100;
       // this.other_percentage = (this.other_memory_cost / total) * 100;
       
-      console.log("Memory calculation completed:", {
-        parameter: this.total_param_mem,
-        gradient: this.total_grad_mem,
-        grad_accumulate: this.total_grad_accumulate_mem,
-        optimizer: this.total_optimizer_mem,
-        activation: this.total_activation,
-        total: this.total_mem
-      });
+      // console.log("Memory calculation completed:", {
+      //   parameter: this.total_param_mem,
+      //   gradient: this.total_grad_mem,
+      //   grad_accumulate: this.total_grad_accumulate_mem,
+      //   optimizer: this.total_optimizer_mem,
+      //   activation: this.total_activation,
+      //   total: this.total_mem
+      // });
     }
     
     // Get memory cost (corresponds to Python version's get_memory_cost method)
@@ -474,7 +475,7 @@ export default class MemoryCostModel {
       // Ensure memory calculation is done first
       this.calculateMemory();
       
-      console.log("Starting memory cost calculation...");
+      // console.log("Starting memory cost calculation...");
       
       // Convert unit from MiB to MB for easier frontend display
       // 1 MiB ≈ 1.048576 MB, but here simplified to approximately equal 1
@@ -498,7 +499,7 @@ export default class MemoryCostModel {
         total: this.total_mem,
       };
       
-      console.log("Basic memory cost calculation completed:", results);
+      // console.log("Basic memory cost calculation completed:", results);
       
       return results;
     }

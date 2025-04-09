@@ -179,7 +179,7 @@ const formatMemoryData = (memoryData, config, language) => {
   rootData.children.push(activationNode);
   rootData.children.push(parameterNode);
   
-  console.log('Treemap data structure:', rootData);
+  // console.log('Treemap data structure:', rootData);
   return [rootData];
 };
 
@@ -486,12 +486,12 @@ function MemoryTreemap({ memoryData, config, error }) {
   useEffect(() => {
     if (memoryData) {
       const formattedData = formatMemoryData(memoryData, config, language);
-      console.log('Formatted treemap data:', formattedData);
+      // console.log('Formatted treemap data:', formattedData);
       setData(formattedData);
       
       // Calculate optimal aspect ratio based on memory distribution
       const bestRatio = calculateBestAspectRatio(memoryData);
-      console.log('Calculated optimal aspect ratio:', bestRatio);
+      // console.log('Calculated optimal aspect ratio:', bestRatio);
       setAspectRatio(bestRatio);
     }
   }, [memoryData, config, language]);
