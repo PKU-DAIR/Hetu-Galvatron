@@ -1,7 +1,8 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { 
   BarChart, Bar, XAxis, YAxis, CartesianGrid, 
-  Tooltip, ResponsiveContainer, Cell
+  Tooltip, ResponsiveContainer, Cell,
+  PieChart, Pie, Sector, Legend
 } from 'recharts';
 import { Typography, Paper, Box, Tabs, Tab } from '@mui/material';
 import { useLanguage, LANGUAGES } from '../context/LanguageContext';
@@ -142,14 +143,79 @@ const processMemoryData = (memoryResults, NAME_MAP) => {
   };
 };
 
+// 自定义动画效果的活跃扇区
+const renderActiveShape = (props) => {
+  const RADIAN = Math.PI / 180;
+  const { 
+    cx, cy, midAngle, innerRadius, outerRadius, startAngle, endAngle,
+    fill, payload, percent, value, name
+  } = props;
+  
+  const sin = Math.sin(-RADIAN * midAngle);
+  const cos = Math.cos(-RADIAN * midAngle);
+  const sx = cx + (outerRadius + 10) * cos;
+  const sy = cy + (outerRadius + 10) * sin;
+  const mx = cx + (outerRadius + 30) * cos;
+  const my = cy + (outerRadius + 30) * sin;
+  const ex = mx + (cos >= 0 ? 1 : -1) * 22;
+  const ey = my;
+  const textAnchor = cos >= 0 ? 'start' : 'end';
+
+  return (
+    <g>
+      <text x={cx} y={cy} dy={8} textAnchor="middle" fill={fill} fontSize={14} fontWeight="bold">
+        {payload.key}
+      </text>
+      <Sector
+        cx={cx}
+        cy={cy}
+        innerRadius={innerRadius}
+        outerRadius={outerRadius}
+        startAngle={startAngle}
+        endAngle={endAngle}
+        fill={fill}
+      />
+      <Sector
+        cx={cx}
+        cy={cy}
+        startAngle={startAngle}
+        endAngle={endAngle}
+        innerRadius={outerRadius + 6}
+        outerRadius={outerRadius + 10}
+        fill={fill}
+      />
+      <path d={`M${sx},${sy}L${mx},${my}L${ex},${ey}`} stroke={fill} fill="none" />
+      <circle cx={ex} cy={ey} r={2} fill={fill} stroke="none" />
+      <text x={ex + (cos >= 0 ? 1 : -1) * 12} y={ey} textAnchor={textAnchor} fill="#333" fontSize={12}>{name}</text>
+      <text x={ex + (cos >= 0 ? 1 : -1) * 12} y={ey} dy={18} textAnchor={textAnchor} fill="#999" fontSize={12}>
+        {`${value.toFixed(2)} MB (${(percent * 100).toFixed(2)}%)`}
+      </text>
+    </g>
+  );
+};
+
 function MemoryVisualization({ memoryResults }) {
   const { language } = useLanguage();
   const NAME_MAP = getNameMap(language);
   const [visMode, setVisMode] = React.useState(0);
+  const [activeIndex, setActiveIndex] = useState(null);
+  const [expandedCategory, setExpandedCategory] = useState(null);
   
   // Handle tab change
   const handleTabChange = (event, newValue) => {
     setVisMode(newValue);
+    setActiveIndex(null);
+    setExpandedCategory(null);
+  };
+  
+  // 处理饼图扇区点击
+  const handlePieClick = (data, index) => {
+    setActiveIndex(index);
+    
+    // 如果点击的是主分类，切换展开/折叠状态
+    if (data.isMainCategory) {
+      setExpandedCategory(expandedCategory === data.key ? null : data.key);
+    }
   };
   
   // Ensure we have data
@@ -171,7 +237,12 @@ function MemoryVisualization({ memoryResults }) {
 
   // Only show top categories in the bar chart
   const chartCategories = allCategories.filter(cat => cat.percentage > 1).slice(0, 10);
-
+  
+  // 为饼图准备数据
+  const pieData = expandedCategory === 'model_states' 
+    ? primaryCategories.find(cat => cat.key === 'model_states')?.children || [] 
+    : primaryCategories;
+  
   // Function to get distinct striped pattern for primary categories
   const getPattern = (key) => {
     switch(key) {
@@ -211,6 +282,7 @@ function MemoryVisualization({ memoryResults }) {
           <Tabs value={visMode} onChange={handleTabChange} centered>
             <Tab label={getText('barChartTab', language)} />
             <Tab label={getText('proportionTab', language)} />
+            <Tab label={getText('pieChartTab', language)} />
           </Tabs>
         </Box>
         
@@ -400,6 +472,99 @@ function MemoryVisualization({ memoryResults }) {
                       </Box>
                     ))}
                 </Box>
+              </Box>
+            </Box>
+          )}
+          
+          {/* 饼图可视化 */}
+          {visMode === 2 && (
+            <Box sx={{ height: 450 }}>
+              <Typography variant="subtitle1" fontWeight="bold" gutterBottom>
+                {expandedCategory === 'model_states' 
+                  ? getText('modelStatesDetails', language)
+                  : getText('memoryDistributionPie', language)}
+              </Typography>
+              
+              {expandedCategory && (
+                <Typography 
+                  variant="body2" 
+                  sx={{ mb: 2, cursor: 'pointer', color: 'primary.main', display: 'inline-block' }}
+                  onClick={() => setExpandedCategory(null)}
+                >
+                  ← {getText('backToMainView', language)}
+                </Typography>
+              )}
+              
+              <Box sx={{ height: 'calc(100% - 40px)', position: 'relative' }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart margin={{ top: 40, right: 30, left: 30, bottom: 30 }}>
+                    {/* 添加图例到顶部 */}
+                    <Legend 
+                      verticalAlign="top" 
+                      height={36} 
+                      iconSize={10}
+                      iconType="circle"
+                      layout="horizontal"
+                      wrapperStyle={{ 
+                        paddingBottom: '15px',
+                        fontSize: '12px'
+                      }}
+                    />
+                    <Pie
+                      activeIndex={activeIndex}
+                      activeShape={renderActiveShape}
+                      data={pieData.filter(item => item.value > 0)}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={70}
+                      outerRadius={100}
+                      fill="#8884d8"
+                      dataKey="value"
+                      nameKey="name"
+                      onMouseEnter={(data, index) => setActiveIndex(index)}
+                      onMouseLeave={() => setActiveIndex(null)}
+                      onClick={(data, index) => handlePieClick(data, index)}
+                      label={false} // 移除外部标签，让图表更清晰
+                      labelLine={false}
+                    >
+                      {pieData.map((entry, index) => (
+                        <Cell 
+                          key={`cell-${index}`} 
+                          fill={entry.color || COLORS[entry.key] || COLORS.other}
+                          style={{ cursor: 'pointer' }}
+                        />
+                      ))}
+                    </Pie>
+                    <Tooltip 
+                      formatter={(value) => [`${value.toFixed(2)} MB (${(value / total * 100).toFixed(1)}%)`, getText('memoryValue', language)]}
+                    />
+                  </PieChart>
+                </ResponsiveContainer>
+                
+                {!expandedCategory && (
+                  <Typography 
+                    variant="body2" 
+                    sx={{ 
+                      position: 'absolute', 
+                      bottom: 10, 
+                      left: 0, 
+                      right: 0, 
+                      textAlign: 'center',
+                      color: 'text.secondary',
+                      px: 2,
+                      fontSize: '0.85rem',
+                      lineHeight: 1.5,
+                      maxWidth: '80%',
+                      mx: 'auto',
+                      wordBreak: 'keep-all',
+                      whiteSpace: 'normal',
+                      borderRadius: 1,
+                      py: 0.5
+                    }}
+                  >
+                    {getText('clickForDetails', language)}
+                  </Typography>
+                )}
               </Box>
             </Box>
           )}

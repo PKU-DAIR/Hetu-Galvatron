@@ -321,7 +321,7 @@ export default class MemoryCostModel {
       if (this.zero_stage >= 3)
         this.param_mem /= this.sdp_size;
     
-      if (this.chunks >= 1 && this.zero_stage <= 1) this.grad_mem = 0;
+      if (this.chunks > 1 && this.zero_stage <= 1) this.grad_mem = 0;
 
       console.log("debug,grad_mem",this.grad_mem,this.grad_accumulate_mem,this.optimizer_mem,this.param_mem);
 
@@ -411,7 +411,7 @@ export default class MemoryCostModel {
       if (this.zero_stage >= 3)
         this.other_param_mem /= this.sdp_size;
     
-      if (this.chunks >= 1 && this.zero_stage <= 1) this.other_grad_mem = 0;
+      if (this.chunks > 1 && this.zero_stage <= 1) this.other_grad_mem = 0;
 
       if (Math.abs(this.other_grad_mem + this.other_grad_accumulate_mem + this.other_optimizer_mem + this.other_param_mem - this.other_memory_model_states) > 1e-6) {
         throw new Error("Other memory calculation error!" + 

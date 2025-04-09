@@ -114,6 +114,10 @@ const translations = {
     [LANGUAGES.ZH]: '全局批次大小',
     [LANGUAGES.EN]: 'Global Batch Size'
   },
+  chunks: {
+    [LANGUAGES.ZH]: '累积次数',
+    [LANGUAGES.EN]: 'Chunks'
+  },
   parallelStrategies: {
     [LANGUAGES.ZH]: '并行策略配置',
     [LANGUAGES.EN]: 'Parallel Strategy Configuration'
@@ -346,7 +350,28 @@ const translations = {
   fileParseError: {
     [LANGUAGES.ZH]: '解析文件失败:',
     [LANGUAGES.EN]: 'Failed to parse file:'
-  }
+  },
+  // 添加饼图相关的翻译
+  pieChartTab: {
+    [LANGUAGES.ZH]: '饼图',
+    [LANGUAGES.EN]: 'Pie Chart'
+  },
+  memoryDistributionPie: {
+    [LANGUAGES.ZH]: '内存分布',
+    [LANGUAGES.EN]: 'Memory Distribution'
+  },
+  modelStatesDetails: {
+    [LANGUAGES.ZH]: '模型状态内存详情',
+    [LANGUAGES.EN]: 'Model States Details'
+  },
+  backToMainView: {
+    [LANGUAGES.ZH]: '返回主视图',
+    [LANGUAGES.EN]: 'Back to main view'
+  },
+  clickForDetails: {
+    [LANGUAGES.ZH]: '点击"模型状态"扇区查看详细内存分布',
+    [LANGUAGES.EN]: 'Click on "Model States" segment to see detailed breakdown'
+  },
 };
 
 /**

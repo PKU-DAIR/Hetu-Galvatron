@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { 
   Slider, TextField, Typography, Box, Paper, 
   Chip, Divider, Grid, Select, MenuItem, FormControl,
@@ -26,28 +26,38 @@ function ConfigPanel({ config, onConfigChange }) {
   // Slider ranges state
   const [ranges, setRanges] = useState(DEFAULT_RANGES);
   
+  // Use useMemo to cache the config string
+  const configString = useMemo(() => JSON.stringify(config), [config]);
+  
   // Update slider ranges based on current config values
   useEffect(() => {
+    // Prevent unnecessary state updates
+    let needsUpdate = false;
     const newRanges = { ...ranges };
     
     // Adjust max ranges if current values exceed them
     const adjustMax = (key, factor = 1.2) => {
       if (config[key] > newRanges[key].max) {
         newRanges[key].max = Math.ceil(config[key] * factor);
+        needsUpdate = true;
       }
     };
     
     adjustMax('seq_length');
     adjustMax('micro_batch_size');
     adjustMax('global_batch_size');
+    adjustMax('chunks');
     adjustMax('total_gpus');
     adjustMax('num_layers');
     
-    setRanges(newRanges);
-  }, [config, ranges]);
-
-  // Check if constraints are satisfied
-  const checkConstraints = () => {
+    // Only call setRanges if there are actual changes
+    if (needsUpdate) {
+      setRanges(newRanges);
+    }
+  }, [configString]); // Use configString instead of config and ranges
+  
+  // Use useMemo to cache the constraints
+  const constraints = useMemo(() => {
     const { tp_size, pp_size, dp_size, total_gpus, micro_batch_size, global_batch_size, chunks } = config;
     
     const gpuConstraint = tp_size * pp_size * dp_size === total_gpus;
@@ -59,12 +69,10 @@ function ConfigPanel({ config, onConfigChange }) {
       gpuProduct: tp_size * pp_size * dp_size,
       batchProduct: micro_batch_size * dp_size * chunks
     };
-  };
+  }, [configString]);
   
-  const constraints = checkConstraints();
-
-  // Handle config parameter changes
-  const handleChange = (key, value) => {
+  // Handle config parameter changes - use useCallback to optimize
+  const handleChange = useCallback((key, value) => {
     const newConfig = { ...config, [key]: value };
     
     // Auto-update related parameters to satisfy constraints
@@ -104,12 +112,12 @@ function ConfigPanel({ config, onConfigChange }) {
     }
     
     onConfigChange(newConfig);
-  };
+  }, [config, onConfigChange]);
   
-  // Handle switch component changes
-  const handleSwitchChange = (key) => (event) => {
+  // Use useCallback to optimize the switch handling function
+  const handleSwitchChange = useCallback((key) => (event) => {
     handleChange(key, event.target.checked);
-  };
+  }, [handleChange]);
   
   // Render fixed parameter chips
   const renderFixedParams = () => (
@@ -303,6 +311,11 @@ function ConfigPanel({ config, onConfigChange }) {
         {/* Global batch size slider */}
         <Grid item xs={12} md={6}>
           {renderSlider(`${getText('globalBatchSize', language)}:`, 'global_batch_size', 1)}
+        </Grid>
+
+        {/* Chunks slider */}
+        <Grid item xs={12} md={6}>
+          {renderSlider(`${getText('chunks', language) || 'Chunks'}:`, 'chunks')}
         </Grid>
       </Grid>
       
