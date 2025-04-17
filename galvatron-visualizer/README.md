@@ -2,6 +2,8 @@
 
 [English](#english) | [中文](#chinese)
 
+<div align=center> <img src="../figs/visualizer-demo.gif" width="800" /> </div>
+
 <a name="english"></a>
 ## Galvatron Memory Visualizer
 
@@ -32,20 +34,22 @@ The visualizer analyzes and displays memory usage across several categories:
 ### Installation
 
 1. Clone the repository
-```bash
-git clone https://github.com/PKU-TANGENT/Hetu-Galvatron.git
-cd Hetu-Galvatron/galvatron-visualizer
-```
+	```bash
+	git clone https://github.com/PKU-DAIR/Hetu-Galvatron.git
+	cd Hetu-Galvatron
+	git checkout galvatron-visualizer
+	cd galvatron-visualizer
+	```
 
 2. Install dependencies
-```bash
-npm install
-```
+	```bash
+	npm install
+	```
 
 3. Start the development server
-```bash
-npm start
-```
+	```bash
+	npm start
+	```
 
 4. Open [http://localhost:3000](http://localhost:3000) to view the application
 
@@ -55,7 +59,6 @@ npm start
 2. **Adjust Parameters**: Modify model parameters in the config panel
 3. **View Memory Analysis**: Observe memory allocation in the treemap visualization
 4. **Analyze Distributions**: Use the bar chart and proportion views to understand memory usage patterns
-5. **Explore Different Strategies**: Test different parallel strategies to optimize memory usage
 
 ### License
 
@@ -91,20 +94,22 @@ Galvatron内存可视化工具是一个用于分析和可视化大型语言模�
 ### 安装说明
 
 1. 克隆仓库
-```bash
-git clone https://github.com/PKU-DAIR/Hetu-Galvatron.git
-cd Hetu-Galvatron/galvatron-visualizer
-```
+	```bash
+	git clone https://github.com/PKU-DAIR/Hetu-Galvatron.git
+	cd Hetu-Galvatron
+	git checkout galvatron-visualizer
+	cd galvatron-visualizer
+	```
 
 2. 安装依赖
-```bash
-npm install
-```
+	```bash
+	npm install
+	```
 
 3. 启动开发服务器
-```bash
-npm start
-```
+	```bash
+	npm start
+	```
 
 4. 打开 [http://localhost:3000](http://localhost:3000) 查看应用
 
@@ -114,7 +119,6 @@ npm start
 2. **调整参数**：在配置面板中修改模型参数
 3. **查看内存分析**：在树状图可视化中观察内存分配
 4. **分析分布**：使用柱状图和比例视图了解内存使用模式
-5. **探索不同策略**：测试不同的并行策略以优化内存使用
 
 ### 许可证
 
