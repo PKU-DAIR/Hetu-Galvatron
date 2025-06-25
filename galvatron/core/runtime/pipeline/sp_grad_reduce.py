@@ -35,9 +35,9 @@ from megatron.core import parallel_state
 from torch.distributed.fsdp._runtime_utils import (
     _low_precision_hook_enabled,
     _post_backward_reshard,
-    _reduce_grad,
     _reduce_grad_no_shard,
 )
+from torch.distributed.fsdp import _runtime_utils
 from torch.distributed.utils import _apply_to_tensors, _cast_forward_inputs, _p_assert, _to_kwargs
 
 log = logging.getLogger(__name__)
@@ -123,7 +123,7 @@ def _post_backward_hook_sp(
                     idx += size
 
             if handle.uses_sharded_strategy:
-                _reduce_grad(state, handle)
+                _runtime_utils._reduce_grad(state, handle)
             else:
                 _reduce_grad_no_shard(state, handle)
             # Since the unsharded gradient is produced in the computation

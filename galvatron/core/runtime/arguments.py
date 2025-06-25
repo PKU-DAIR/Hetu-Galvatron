@@ -214,4 +214,10 @@ def galvatron_training_args(parser, use_megatron=True):
         help="Tensor parallel degree of experts.",
     )
 
+    group.add_argument(
+        "--use_fsep",
+        action="store_true",
+        help="Whether to use fsep.",
+    )
+
     return parser

@@ -128,8 +128,12 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
         elif name.startswith("experts"):
             # Sequential
             args = get_args()
-            ep_world_size = dist.get_world_size(ep_groups)
-            ep_rank = dist.get_rank(ep_groups)
+            if args.use_fsep:
+                ep_world_size = 1
+                ep_rank = 0
+            else:
+                ep_world_size = dist.get_world_size(ep_groups)
+                ep_rank = dist.get_rank(ep_groups)
             expert_start_index, expert_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                 args.num_experts, ep_rank, ep_world_size
             )

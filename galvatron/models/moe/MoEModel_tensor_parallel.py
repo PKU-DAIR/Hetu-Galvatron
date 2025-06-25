@@ -108,6 +108,8 @@ class MoEMLP_tp(nn.Module):
     def __init__(self, config, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None):
         super().__init__()
         args = get_args()
+        self.use_fsep = args.use_fsep
+        self.is_moe_layer = self.use_fsep
         self.idx = layer_number
         megatron_config = core_transformer_config_from_args(args)
         self.config = megatron_config
@@ -120,6 +122,7 @@ class MoEMLP_tp(nn.Module):
         assert self.expert_parallel_size > 0, "Expected non-negative expert parallel size"
 
         assert self.config.num_moe_experts % self.expert_parallel_size == 0
+        self.num_global_experts = self.config.num_moe_experts
         self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
         local_expert_indices_offset = (
             mpu.get_expert_model_parallel_rank(self.ep_group) * self.num_local_experts
@@ -146,24 +149,53 @@ class MoEMLP_tp(nn.Module):
             )
         
         if args.moe_grouped_gemm:
+            assert self.use_fsep is False, "Grouped gemm does not support fsep."
             self.experts = GroupedMLP(self.num_local_experts, self.config, self.tp_of_ep_group)
         else:
             # TODO: TE Tensor Parallel Adaptation
-            self.experts = SequentialMLP(
-                self.num_local_experts,
-                self.config,
-                MLPSubmodules(
-                    linear_fc1=ColumnParallelLinear,
-                    linear_fc2=RowParallelLinear,
-                ),
-                self.tp_of_ep_group,
-                self.tp_and_ep_group,
-            )
+            if self.use_fsep:
+                self.experts = SequentialMLP(
+                    self.num_global_experts,
+                    self.config,
+                    MLPSubmodules(
+                        linear_fc1=ColumnParallelLinear,
+                        linear_fc2=RowParallelLinear,
+                    ),
+                    self.tp_of_ep_group,
+                    self.tp_and_ep_group,
+                )
+                self.real_experts = SequentialMLP(
+                    self.num_local_experts,
+                    self.config,
+                    MLPSubmodules(
+                        linear_fc1=ColumnParallelLinear,
+                        linear_fc2=RowParallelLinear,
+                    ),
+                    self.tp_of_ep_group,
+                    self.tp_and_ep_group,
+                )
+                self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
+                self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.num_local_experts // self.num_global_experts).reshape(-1, self.expert_parallel_size).transpose(0,1).contiguous()
+            else:
+                self.experts = SequentialMLP(
+                    self.num_local_experts,
+                    self.config,
+                    MLPSubmodules(
+                        linear_fc1=ColumnParallelLinear,
+                        linear_fc2=RowParallelLinear,
+                    ),
+                    self.tp_of_ep_group,
+                    self.tp_and_ep_group,
+                )
+
     def forward(self, hidden_states, mlp_residual, probs, routing_map):
         (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
                 hidden_states, probs, routing_map
             )
-        expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
+        if self.use_fsep:
+            expert_output, mlp_bias = self.real_experts(dispatched_input, tokens_per_expert)
+        else:
+            expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
         hidden_states, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
         hidden_states = hidden_states + mlp_residual
         return hidden_states
