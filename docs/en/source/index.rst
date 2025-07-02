@@ -45,7 +45,7 @@ Galvatron is an automatic distributed training system designed for Transformer m
    Galvatron Model Usage <4_galvatron_model_usage/galvatron_model_usage>
    Search Engine Usage <5_search_engine_usage/search_engine_usage>
    Visualization(New Feature!) <7_visualization/visualization>
-   Developer Guide <6_developer_guide/developer_guide>
+   Contributing & Community <6_developer_guide/developer_guide>
 
 Supported Parallelism Strategies
 ================================

@@ -163,6 +163,18 @@ Online version: [Galvatron Visualizer](http://galvatron-visualizer.pkudair.site/
 
 Check our [release plan](https://github.com/PKU-DAIR/Hetu-Galvatron/issues/14) for upcoming features.
 
+## Contributing
+
+We welcome contributions from the community! Whether you're fixing bugs, adding features, improving documentation, or spreading the word, your help is appreciated.
+
+**[View Contributing Guide](CONTRIBUTING.md)** | **[Documentation](https://hetu-galvatron.readthedocs.io)**
+
+### Quick Ways to Contribute:
+- [Report bugs](https://github.com/PKU-DAIR/Hetu-Galvatron/issues)
+- [Request features](https://github.com/PKU-DAIR/Hetu-Galvatron/issues)
+- [Improve documentation](https://github.com/PKU-DAIR/Hetu-Galvatron/tree/main/docs)
+- [Submit pull requests](https://github.com/PKU-DAIR/Hetu-Galvatron/pulls)
+
 ## Feedback
 
 [Fill an issue](https://github.com/PKU-DAIR/Hetu-Galvatron/issues) or contact us via Xinyi Liu, xy.liu@stu.pku.edu.cn, Yujie Wang, alfredwang@pku.edu.cn, or Shenhan Zhu, 

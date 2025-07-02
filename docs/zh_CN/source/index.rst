@@ -45,7 +45,7 @@ Galvatron 是一个为 Transformer 模型（包括大语言模型 LLMs）设计�
    Galvatron 模型使用 <4_galvatron_model_usage/galvatron_model_usage_zh>
    搜索引擎使用 <5_search_engine_usage/search_engine_usage_zh>
    可视化 <7_visualization/visualization_zh>
-   开发指南 <6_developer_guide/developer_guide_zh>
+   贡献指南与社区 <6_developer_guide/developer_guide_zh>
 
 
 支持的并行策略
