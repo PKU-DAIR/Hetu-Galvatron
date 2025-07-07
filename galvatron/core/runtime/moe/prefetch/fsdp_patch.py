@@ -143,7 +143,7 @@ def new_init(self, *args, **kwargs):
     if getattr(_fully_sharded_module, "is_moe_layer", False):
         self.is_moe_layer = True
         self.global_expert_num = _fully_sharded_module.num_global_experts
-        self.local_expert_num = _fully_sharded_module.num_local_experts
+        self.local_expert_num = _fully_sharded_module.expert_capacity_per_device
         # [world_size * local_expert_num]
         self.global_placement = _fully_sharded_module.global_expert_indices
     else:
@@ -297,6 +297,10 @@ def new_init_flat_param_and_metadata(
             _convert_to_params(shared_params) if use_orig_params else None,
             is_padding_mask,
         )
+        # Scaling _unpadded_unsharded_size
+        size_list = list(self.flat_param._unpadded_unsharded_size)
+        size_list[0] *= self.local_expert_num
+        self.flat_param._unpadded_unsharded_size = torch.Size(size_list)
 
 def new_init_flat_param_attributes(self) -> None:
     if not self.is_moe_layer:

@@ -8,6 +8,7 @@ from megatron.training.arguments import core_transformer_config_from_args
 from torch import nn
 
 from galvatron.core import get_args
+from galvatron.core.runtime.tensor_parallel import ParallelMLP
 from galvatron.core.runtime.tensor_parallel.mlp import MLPSubmodules
 from galvatron.core.runtime.tensor_parallel.attention import SelfAttention, SelfAttentionSubmodules
 from galvatron.core.runtime.tensor_parallel.attention_impl import DotProductAttention, FlashSelfOrCrossAttention, DistributedAttention
@@ -18,6 +19,7 @@ from galvatron.core.runtime.moe.token_dispatcher import (
     MoEAlltoAllTokenDispatcher,
     MoEFlexTokenDispatcher,
 )
+from galvatron.core.runtime.moe.smart_routing import MoEAlltoAllSmartTokenDispatcher
 
 
 class MoEAttention_tp(nn.Module):
@@ -105,8 +107,13 @@ class MoERouter(nn.Module):
     
 # TODO: Add shared expert support
 class MoEMLP_tp(nn.Module):
-    def __init__(self, config, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None):
+    def __init__(self, config, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None, test_mode=False):
         super().__init__()
+        if test_mode:
+            megatron_config = core_transformer_config_from_args(get_args())
+            self.tp_group = tp_group.group if tp_group is not None else None
+            self.mlp = ParallelMLP(megatron_config, tp_group=self.tp_group)
+            return
         args = get_args()
         self.use_fsep = args.use_fsep
         self.is_moe_layer = self.use_fsep
@@ -124,29 +131,46 @@ class MoEMLP_tp(nn.Module):
         assert self.config.num_moe_experts % self.expert_parallel_size == 0
         self.num_global_experts = self.config.num_moe_experts
         self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
+        self.expert_capacity_per_device = args.expert_capacity_per_device
+        expert_capacity_offset = (
+            mpu.get_expert_model_parallel_rank(self.ep_group) * self.expert_capacity_per_device
+        )
+        self.expert_capacity_indices = [
+            expert_capacity_offset + i for i in range(self.expert_capacity_per_device)
+        ]
         local_expert_indices_offset = (
             mpu.get_expert_model_parallel_rank(self.ep_group) * self.num_local_experts
         )
         self.local_expert_indices = [
             local_expert_indices_offset + i for i in range(self.num_local_experts)
         ]
-        assert all(map(lambda x: x < self.config.num_moe_experts, self.local_expert_indices))
+        # assert all(map(lambda x: x < self.config.num_moe_experts, self.local_expert_indices))
 
-        if self.config.moe_token_dispatcher_type == "allgather":
-            self.token_dispatcher = MoEAllGatherTokenDispatcher(
-                self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
-            )
-        elif self.config.moe_token_dispatcher_type == "alltoall":
-            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
-                self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+        if self.use_fsep:
+            # TODO: Update solver to modify global_expert_indices
+            self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
+            self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
+            self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
+                self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
                 layer_number = self.idx
             )
-        elif self.config.moe_token_dispatcher_type == "alltoall_seq":
-            assert False, "alltoall_seq is deprecated"
-        elif self.config.moe_token_dispatcher_type == "flex":
-            self.token_dispatcher = MoEFlexTokenDispatcher(
-                self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
-            )
+        else:
+            self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
+            if self.config.moe_token_dispatcher_type == "allgather":
+                self.token_dispatcher = MoEAllGatherTokenDispatcher(
+                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
+                )
+            elif self.config.moe_token_dispatcher_type == "alltoall":
+                self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+                    layer_number = self.idx
+                )
+            elif self.config.moe_token_dispatcher_type == "alltoall_seq":
+                assert False, "alltoall_seq is deprecated"
+            elif self.config.moe_token_dispatcher_type == "flex":
+                self.token_dispatcher = MoEFlexTokenDispatcher(
+                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
+                )
         
         if args.moe_grouped_gemm:
             assert self.use_fsep is False, "Grouped gemm does not support fsep."
@@ -165,7 +189,7 @@ class MoEMLP_tp(nn.Module):
                     self.tp_and_ep_group,
                 )
                 self.real_experts = SequentialMLP(
-                    self.num_local_experts,
+                    self.expert_capacity_per_device,
                     self.config,
                     MLPSubmodules(
                         linear_fc1=ColumnParallelLinear,
@@ -174,8 +198,6 @@ class MoEMLP_tp(nn.Module):
                     self.tp_of_ep_group,
                     self.tp_and_ep_group,
                 )
-                self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
-                self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.num_local_experts // self.num_global_experts).reshape(-1, self.expert_parallel_size).transpose(0,1).contiguous()
             else:
                 self.experts = SequentialMLP(
                     self.num_local_experts,
@@ -189,15 +211,21 @@ class MoEMLP_tp(nn.Module):
                 )
 
     def forward(self, hidden_states, mlp_residual, probs, routing_map):
-        (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
-                hidden_states, probs, routing_map
-            )
-        if self.use_fsep:
-            expert_output, mlp_bias = self.real_experts(dispatched_input, tokens_per_expert)
+        if probs is not None and routing_map is not None:
+            (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
+                    hidden_states, probs, routing_map
+                )
+            if self.use_fsep:
+                expert_output, mlp_bias = self.real_experts(dispatched_input, tokens_per_expert)
+            else:
+                expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
+            hidden_states, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+            hidden_states = hidden_states + mlp_residual
         else:
-            expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
-        hidden_states, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
-        hidden_states = hidden_states + mlp_residual
+            # Only for test
+            input_tensor = hidden_states
+            hidden_states, bias = self.mlp(hidden_states)
+            hidden_states = hidden_states + input_tensor
         return hidden_states
 
 
@@ -224,23 +252,83 @@ class MoELayer_tp(nn.Module):
         layer_output = self.mlp(attention_output, mlp_residual, probs, routing_map)
         return layer_output
 
+class MoELayer_attention(nn.Module):
+    def __init__(self, config, layer_number, tp_group=None, sp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None):
+        super().__init__()
+        self.attention = MoEAttention_tp(config, layer_number, tp_group, sp_group)
+        self.idx = layer_number
+    
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        rotary_embedding=None,
+    ):
+        attention_output, mlp_residual = self.attention(
+            hidden_states,
+            attention_mask,
+            rotary_embedding,
+        )
+        return attention_output
+
+class MoELayer_mlp(nn.Module):
+    def __init__(self, config, layer_number, tp_group=None, sp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None):
+        super().__init__()
+        self.mlp = MoEMLP_tp(config, layer_number, tp_group, ep_group, tp_of_ep_group, tp_and_ep_group, True)
+        self.idx = layer_number
+    
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        rotary_embedding=None,
+    ):
+        layer_output = self.mlp(hidden_states, None, None, None)
+        return layer_output
+
 
 def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc, ep_groups_enc, tp_of_ep_groups_enc, tp_and_ep_groups_enc):
-    layers_tp = nn.ModuleList(
-        [
-            MoELayer_tp(config, i, 
-                tp_group=tp_groups_enc[i + 1], 
-                sp_group=sp_groups_enc[i + 1], 
-                ep_group=ep_groups_enc[i + 1], 
-                tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
-                tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
-            for i in range(config.num_hidden_layers)
-        ]
-    )
-    for i in range(len(layers_tp)-1):
-        layers_tp[i].router.predict = layers_tp[i+1].router.router.predict
-    setattr(model.model, "layers", layers_tp)
     args = get_args()
+    if args.profile_unit == "attention":
+        layers_tp = nn.ModuleList(
+            [
+                MoELayer_attention(config, i, 
+                    tp_group=tp_groups_enc[i + 1], 
+                    sp_group=sp_groups_enc[i + 1], 
+                    ep_group=ep_groups_enc[i + 1], 
+                    tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
+                    tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+    elif args.profile_unit == "mlp":
+        layers_tp = nn.ModuleList(
+            [
+                MoELayer_mlp(config, i, 
+                    tp_group=tp_groups_enc[i + 1], 
+                    sp_group=sp_groups_enc[i + 1], 
+                    ep_group=ep_groups_enc[i + 1], 
+                    tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
+                    tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+    else: # "all"
+        layers_tp = nn.ModuleList(
+            [
+                MoELayer_tp(config, i, 
+                    tp_group=tp_groups_enc[i + 1], 
+                    sp_group=sp_groups_enc[i + 1], 
+                    ep_group=ep_groups_enc[i + 1], 
+                    tp_of_ep_group=tp_of_ep_groups_enc[i + 1], 
+                    tp_and_ep_group=tp_and_ep_groups_enc[i + 1])
+                for i in range(config.num_hidden_layers)
+            ]
+        )
+        for i in range(len(layers_tp)-1):
+            layers_tp[i].router.predict = layers_tp[i+1].router.router.predict
+    setattr(model.model, "layers", layers_tp)
+    
     megatron_config = core_transformer_config_from_args(get_args())
     setattr(
         model.model,

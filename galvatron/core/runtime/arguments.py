@@ -220,4 +220,18 @@ def galvatron_training_args(parser, use_megatron=True):
         help="Whether to use fsep.",
     )
 
+    group.add_argument(
+        "--profile_unit",
+        choices=["attention", "mlp", "all"],
+        default="all",
+        help="Profile granularity",
+    )
+
+    group.add_argument(
+        "--expert_capacity_per_device",
+        type=int,
+        default=1,
+        help="Expert capacity per device.",
+    )
+
     return parser

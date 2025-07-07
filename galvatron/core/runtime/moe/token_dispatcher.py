@@ -72,6 +72,11 @@ class MoETokenDispatcher:
     def tp_rank(self):
         """Get expert tensor parallel rank."""
         return parallel_state.get_expert_tensor_parallel_rank(self.tp_of_ep_group)
+    
+    @property
+    def ep_rank(self):
+        """Get expert model parallel rank."""
+        return parallel_state.get_expert_model_parallel_rank(self.ep_group)
 
     @property
     def tp_ep_group(self):

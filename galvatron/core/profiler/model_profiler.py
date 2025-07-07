@@ -356,16 +356,19 @@ class ModelProfiler(BaseProfiler):
                     val = config[key]
                     avg_time = (val - val_base) / bsz / (self.args.layernum_max - self.args.layernum_min)
                     write_key = f"layertype_{idx}_bsz{bsz}_seq{seq[idx]}"
+                    if self.args.profile_unit != "all":
+                        write_key += f"_{self.args.profile_unit}"
                     config[write_key] = avg_time
                     total_avg_time.append(avg_time)
 
+                if self.args.profile_unit == "all":
                 # Calculate other computation overhead
-                other_time = val_base
-                for idx in range(len(total_avg_time)):
-                    other_time -= layernum_lists[0][idx] * total_avg_time[idx] * bsz
-                other_time /= bsz
-                write_key = f"layertype_other_bsz{bsz}_{seq_info}"
-                config[write_key] = max(other_time, 0)
+                    other_time = val_base
+                    for idx in range(len(total_avg_time)):
+                        other_time -= layernum_lists[0][idx] * total_avg_time[idx] * bsz
+                    other_time /= bsz
+                    write_key = f"layertype_other_bsz{bsz}_{seq_info}"
+                    config[write_key] = max(other_time, 0)
 
                 # Write results to config file
                 write_json_config(config, time_config_path)
@@ -730,6 +733,8 @@ class ModelProfiler(BaseProfiler):
                 s += f"_{seq}"
             else:
                 s += f"_seq{seq}"
+        if self.args.profile_unit != "all":
+            s += f"_{self.args.profile_unit}"
         if rank is not None and type is not None:
             s += f"_rank{rank}_{type}"
         return s
@@ -844,6 +849,7 @@ class ModelProfiler(BaseProfiler):
             "seq_length",
             "encoder_seq_length",
             "decoder_seq_length",
+            "is_moe_model",
         ]
         exclude_arg_names = profile_arg_names + self.layernum_arg_names
         MODEL_ARGS = self.args2str(self.args._get_kwargs(), exclude_arg_names)
@@ -960,6 +966,7 @@ class ModelProfiler(BaseProfiler):
             "default_dp_type": self.args.profile_dp_type if self.args.profile_type == "memory" else "ddp",
             "mixed_precision": self.args.mixed_precision,
             "shape_order": self.args.shape_order,
+            "profile_unit": self.args.profile_unit,
         }
 
         # Add optional flags
@@ -967,6 +974,8 @@ class ModelProfiler(BaseProfiler):
             args["use-flash-attn"] = ""
         if self.args.sequence_parallel:
             args["sequence-parallel"] = ""
+        if self.args.is_moe_model:
+            args["is_moe_model"] = ""
         return args
 
     def get_layernum_args(self, args: Dict[str, Any], layernum_list: List[int]) -> None:

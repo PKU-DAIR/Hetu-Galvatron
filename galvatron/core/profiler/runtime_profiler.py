@@ -180,6 +180,7 @@ class RuntimeProfiler(BaseProfiler):
                         args.sequence_parallel,
                         args.vocab_tp,
                         self.seqlen_list,
+                        args.profile_unit,
                     )
 
             if hasattr(args, "save_profiled_memory") and args.save_profiled_memory:
@@ -270,7 +271,7 @@ class RuntimeProfiler(BaseProfiler):
                 assert self.layernum_list is not None
                 time_config_path = self.time_profiling_path()
                 save_profiled_time(
-                    time_config_path, avg_time, args.global_train_batch_size, self.layernum_list, self.seqlen_list
+                    time_config_path, avg_time, args.global_train_batch_size, self.layernum_list, self.seqlen_list, args.profile_unit
                 )
 
             if self.exit:
@@ -289,7 +290,7 @@ class RuntimeProfiler(BaseProfiler):
             assert self.layernum_list is not None
             time_config_path = self.time_profiling_path()
             save_profiled_time(
-                time_config_path, avg_time * 1e3, args.global_train_batch_size, self.layernum_list, self.seqlen_list
+                time_config_path, avg_time * 1e3, args.global_train_batch_size, self.layernum_list, self.seqlen_list, args.profile_unit
             )
 
         if self.exit:

@@ -88,6 +88,13 @@ def galvatron_profile_args(parser):
         help="Pad the vocab size to be divisible by this value." "This is added for computational efficieny reasons.",
     )
 
+    group.add_argument(
+        "--profile_unit",
+        choices=["attention", "mlp", "all"],
+        default="all",
+        help="Profile granularity",
+    )
+
     return parser
 
 

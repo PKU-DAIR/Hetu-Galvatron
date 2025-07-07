@@ -34,6 +34,7 @@ def save_profiled_memory(
     sequence_parallel=False,
     vocab_tp=1,
     seq=None,
+    profile_unit="all",
 ):
     config = read_json_config(path) if os.path.exists(path) else {}
     key = "%d_%d_%d" % (pp_deg, tp_deg, world_size // pp_deg // tp_deg)
@@ -47,18 +48,25 @@ def save_profiled_memory(
         config[key] = {}
     layernum_info = num2str(layer_num, "layernum")
     seq_info = num2str(seq, "seq")
-    config[key]["%s_bsz%d_%s_rank%d_ms" % (layernum_info, bsz, seq_info, rank)] = model_states
-    config[key]["%s_bsz%d_%s_rank%d_act" % (layernum_info, bsz, seq_info, rank)] = activation
-    config[key]["%s_bsz%d_%s_rank%d_act_peak" % (layernum_info, bsz, seq_info, rank)] = activation_peak
+    if profile_unit == "all":
+        config[key]["%s_bsz%d_%s_rank%d_ms" % (layernum_info, bsz, seq_info, rank)] = model_states
+        config[key]["%s_bsz%d_%s_rank%d_act" % (layernum_info, bsz, seq_info, rank)] = activation
+        config[key]["%s_bsz%d_%s_rank%d_act_peak" % (layernum_info, bsz, seq_info, rank)] = activation_peak
+    else:
+        config[key]["%s_bsz%d_%s_%s_rank%d_ms" % (layernum_info, bsz, seq_info, profile_unit, rank)] = model_states
+        config[key]["%s_bsz%d_%s_%s_rank%d_act" % (layernum_info, bsz, seq_info, profile_unit, rank)] = activation
+        config[key]["%s_bsz%d_%s_%s_rank%d_act_peak" % (layernum_info, bsz, seq_info, profile_unit, rank)] = activation_peak
     write_json_config(config, path)
     print("Already written profiled memory into config file %s!\n" % (path))
 
 
-def save_profiled_time(path, time, bsz, layer_num, seq):
+def save_profiled_time(path, time, bsz, layer_num, seq, profile_unit):
     config = read_json_config(path) if os.path.exists(path) else {}
     layernum_info = num2str(layer_num, "layernum")
     seq_info = num2str(seq, "seq")
     key = "%s_bsz%d_%s" % (layernum_info, bsz, seq_info)
+    if profile_unit != "all":
+        key += "_%s" % (profile_unit)
     config[key] = time
     write_json_config(config, path)
     print("Already written profiled time into config file %s!\n" % (path))
