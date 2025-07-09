@@ -4,6 +4,8 @@ import torch
 import torch.distributed as dist
 
 from galvatron.core.runtime.moe.token_dispatcher import MoETokenDispatcher
+from galvatron.core import get_args
+from galvatron.core.runtime.moe.prefetch.async_linear_programming import submit_lp_optimization
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.moe.moe_utils import (
@@ -106,6 +108,20 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         self.cuda_dtoh_stream = torch.cuda.Stream()
 
         self.shared_experts = None
+
+        self.history_capacity = 10
+        self.history_num_global_tokens_per_expert = []
+
+        args = get_args()
+        
+        # Async Linear Programming Solver configuration
+        self.async_lp_solver_config = {
+            "enabled": True,
+            "computation_config_path": getattr(args, 'moe_computation_config_path', './configs/computation_profiling_bf16_mixtral-8x7b.json'),
+            "network_config_path": getattr(args, 'moe_network_config_path', './configs/network_config.json'),
+            "expert_capacity_per_device": self.num_local_experts
+        }
+        self.async_lp_task_id = None
     
     def get_smart_routing_map(self, num_global_tokens_per_expert: torch.Tensor, global_expert_indices: torch.Tensor) -> torch.Tensor:
         """
@@ -281,7 +297,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
     
         return new_routing_map, new_probs
 
-    def get_new_routing_map_vectorized(self, new_num_global_tokens_per_expert: torch.Tensor, global_expert_indices: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
+    def get_new_routing_map_vectorized(self, new_num_global_tokens_per_expert: torch.Tensor, global_expert_indices: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Get the new routing map with vectorized operation.
         Args:
@@ -350,7 +366,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                         break
                     
                     # calculate how many tokens can be assigned to this location
-                    available = min(tokens_per_location[i], num_tokens - allocated)
+                    available = min(tokens_per_location[i].item(), num_tokens - allocated)
                     if available > 0:
                         # batch set routing map and probs
                         token_batch = token_indices[allocated:allocated + available]
@@ -437,6 +453,27 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 .reshape(self.ep_size, self.tp_size, self.num_experts)
                 .transpose(0, 1)
             )
+            if len(self.history_num_global_tokens_per_expert) < self.history_capacity:
+                self.history_num_global_tokens_per_expert.append(num_global_tokens_per_expert.clone())
+            else:
+                self.history_num_global_tokens_per_expert.append(num_global_tokens_per_expert.clone())
+                self.history_num_global_tokens_per_expert.pop(0)
+            
+            # Submit async linear programming optimization task
+            if (self.async_lp_solver_config["enabled"] and 
+                submit_lp_optimization is not None):
+                with torch.no_grad():
+                    total_num_global_tokens_per_expert = torch.sum(torch.stack(self.history_num_global_tokens_per_expert)[:,self.tp_rank], dim=0).cpu()
+                    self.async_lp_task_id = submit_lp_optimization(
+                        history_data=total_num_global_tokens_per_expert,
+                        layer_number=self.layer_number,
+                        computation_config_path=self.async_lp_solver_config["computation_config_path"],
+                        network_config_path=self.async_lp_solver_config["network_config_path"],
+                        expert_capacity_per_device=self.async_lp_solver_config["expert_capacity_per_device"]
+                    )
+                    # Pass task ID to FSDP layer for prefetch result retrieval
+                    self._notify_fsdp_layer_task_id(self.async_lp_task_id)
+                
             # with torch.no_grad():
             #     if torch.cuda.current_device() == 0:
             #         import os
@@ -497,6 +534,10 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             <= self.cuda_sync_point_priority[self.cuda_sync_point]
         ), "cuda_sync_point must be after cuda_dtoh_point."
         return num_tokens_per_local_expert, new_routing_map, new_probs
+    
+    def _notify_fsdp_layer_task_id(self, task_id):
+        """Notify FSDP layer about async LP task ID for prefetch result retrieval"""
+        self.fsdp_handle.set_lp_task_id(task_id)
 
     def token_permutation(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor

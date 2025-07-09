@@ -150,10 +150,14 @@ class MoEMLP_tp(nn.Module):
             # TODO: Update solver to modify global_expert_indices
             self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
             self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
-            self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
-                self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+                self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
                 layer_number = self.idx
             )
+            # self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
+            #     self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+            #     layer_number = self.idx
+            # )
         else:
             self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
             if self.config.moe_token_dispatcher_type == "allgather":

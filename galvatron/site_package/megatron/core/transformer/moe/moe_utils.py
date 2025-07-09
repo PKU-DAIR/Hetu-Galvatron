@@ -251,10 +251,12 @@ def permute(
                                        If set to true, routing_map has a fixed number of non-zeros
                                        in each column.
     """
-    if fused:
-        if not HAVE_TE or fused_permute is None:
-            raise ValueError("fused_permute is not available. Please install TE >= 2.1.0.")
-        return fused_permute(tokens, routing_map, num_out_tokens)
+    from galvatron.core.runtime.moe.fused_kernel import moe_permute
+    return moe_permute(tokens, routing_map, num_out_tokens)
+    # if fused:
+    #     if not HAVE_TE or fused_permute is None:
+    #         raise ValueError("fused_permute is not available. Please install TE >= 2.1.0.")
+    #     return fused_permute(tokens, routing_map, num_out_tokens)
 
     num_tokens, hidden = tokens.shape
     num_experts = routing_map.shape[1]
@@ -319,10 +321,18 @@ def unpermute(
     Returns:
         torch.Tensor: The tokens restored to their original order.
     """
-    if fused:
-        if not HAVE_TE or fused_unpermute is None:
-            raise ValueError("fused_unpermute is not available. Please install TE >= 2.1.0.")
-        return fused_unpermute(permuted_tokens, sorted_indices, probs, restore_shape)
+    # if fused:
+    from galvatron.core.runtime.moe.fused_kernel import moe_unpermute
+    # torch.save({
+    #         'permuted_tokens': permuted_tokens,
+    #         'sorted_indices': sorted_indices,
+    #         'probs': probs,
+    #         'restore_shape': restore_shape
+    #     }, f'debug_log/data_{torch.cuda.current_device()}.pt')
+    return moe_unpermute(permuted_tokens, sorted_indices, probs, restore_shape)
+        # if not HAVE_TE or fused_unpermute is None:
+        #     raise ValueError("fused_unpermute is not available. Please install TE >= 2.1.0.")
+        # return fused_unpermute(permuted_tokens, sorted_indices, probs, restore_shape)
 
     _, hidden = restore_shape
     input_dtype = permuted_tokens.dtype

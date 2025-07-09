@@ -36,6 +36,18 @@ from torch.distributed.fsdp._runtime_utils import (
     _post_reduce_grad_callback,
 )
 
+# Import async linear programming solver
+from galvatron.core.runtime.moe.prefetch.async_linear_programming import (
+    submit_lp_optimization,
+    get_lp_optimization_result,
+    cleanup_global_lp_solver
+    )
+
+from galvatron.core.runtime.moe.fused_kernel import (
+    triton_optimized_all_to_all_expert_weights,
+    triton_optimized_all_to_all_expert_grads,
+)
+
 log = logging.getLogger(__name__)
 
 original_init = FlatParamHandle.__init__
@@ -136,6 +148,9 @@ def _new_init(
             submodule._parameters[param_name] = None
     self.flat_param._unpadded_unsharded_size = torch.Size((self.flat_param._unpadded_unsharded_size[0] // self.world_size,))
 
+    self._fully_sharded_module.token_dispatcher.fsdp_handle = self
+    self.lp_pending_task_id = None
+
 def new_init(self, *args, **kwargs):
 
     _fully_sharded_module = args[1]
@@ -153,6 +168,31 @@ def new_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
     else:
         _new_init(self, *args, **kwargs)
+
+def _async_lp_prefetch_logic(self):
+    """Async linear programming prefetch logic - get results from pending tasks"""
+    if self.lp_pending_task_id is not None:
+        result = get_lp_optimization_result(self.lp_pending_task_id, timeout=0.0)
+        if result is not None:
+            self._process_lp_result(result)
+            self.lp_pending_task_id = None
+
+def _process_lp_result(self, result):
+    """Process linear programming optimization result"""
+    if result.get("status") == "success":
+        # Here optimization results can be applied to routing strategy
+        # Actual implementation needs to be adjusted based on specific MoE router interface
+        # print(f"Linear programming optimization result: {result}")
+        self.global_placement = torch.tensor(result.get("expert_placement"), dtype=self.global_placement.dtype, device=self.global_placement.device)
+        self._fully_sharded_module.token_dispatcher.global_expert_indices = self.global_placement
+        
+    else:
+        assert False, f"Linear programming optimization failed {result}"
+
+def set_lp_task_id(self, task_id):
+    """Set async linear programming task ID from smart routing"""
+    if hasattr(self, 'lp_pending_task_id'):
+        self.lp_pending_task_id = task_id
 
 def new_init_flat_param_and_metadata(
     self,
@@ -464,12 +504,58 @@ def _all_to_all_grad_type1(
     padded_unsharded_grad = padded_unsharded_grad.reshape(-1)
     return padded_unsharded_grad, new_sharded_grad
 
+def _all_to_all_flat_param_type2_triton(
+    self,
+    padded_unsharded_flat_param: Tensor,
+    sharded_flat_param: Tensor,
+    process_group,
+):
+    """Triton-optimized expert weights all_to_all operation"""
+    sharded_flat_param = sharded_flat_param.contiguous().reshape(self.global_expert_num, -1)
+    
+    # Use Triton-optimized all_to_all
+    padded_unsharded_flat_param, sharded_flat_param = triton_optimized_all_to_all_expert_weights(
+        sharded_flat_param,
+        self.global_placement,
+        self.world_size,
+        self.local_expert_num,
+        process_group
+    )
+    
+    return padded_unsharded_flat_param, sharded_flat_param
+
+@torch.no_grad()
+def _all_to_all_grad_type2_triton(
+    handle: FlatParamHandle,
+    padded_unsharded_grad: Tensor,
+    new_sharded_grad: Tensor,
+    process_group,
+):
+    """Triton-optimized expert gradient all_to_all operation"""
+    # Use Triton-optimized gradient all_to_all
+    padded_unsharded_grad, new_sharded_grad = triton_optimized_all_to_all_expert_grads(
+        padded_unsharded_grad,
+        handle.global_placement,
+        handle.world_size,
+        handle.global_expert_num,
+        handle.local_expert_num,
+        process_group
+    )
+    
+    return padded_unsharded_grad, new_sharded_grad
+
+
 def new_all_gather_flat_param(
     self,
     padded_unsharded_flat_param: Tensor,
 ) -> Tensor:
     if not self.is_moe_layer:
         return original_all_gather_flat_param(self, padded_unsharded_flat_param)
+    
+    # Async linear programming prefetch logic
+    if self._training_state == HandleTrainingState.FORWARD:
+        self._async_lp_prefetch_logic()
+    
     _p_assert(
         hasattr(self, "process_group") and hasattr(self, "world_size"),
         "Expects a process group and world size to have been set via `shard()`",
@@ -642,11 +728,14 @@ FlatParamHandle._init_flat_param_and_metadata = new_init_flat_param_and_metadata
 FlatParamHandle.init_flat_param_attributes = new_init_flat_param_attributes
 FlatParamHandle.flatten_tensors_into_flat_param = new_flatten_tensors_into_flat_param
 FlatParamHandle._all_gather_flat_param = new_all_gather_flat_param
-FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type1
+FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type2_triton
 FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backward
+FlatParamHandle.set_lp_task_id = set_lp_task_id
+FlatParamHandle._async_lp_prefetch_logic = _async_lp_prefetch_logic
+FlatParamHandle._process_lp_result = _process_lp_result
 
 # TODO: maybe improve this function to save memory? (same experts)
 # FlatParamHandle._use_unsharded_views = new_use_unsharded_views
 
 _runtime_utils._reduce_grad = new_reduce_grad
-_all_to_all_grad = _all_to_all_grad_type1
+_all_to_all_grad = _all_to_all_grad_type2_triton
