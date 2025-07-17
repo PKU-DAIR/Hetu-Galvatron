@@ -816,6 +816,7 @@ def _process_all_to_all_recv_kernel(
         shard_offset += BLOCK_SIZE
 
 def triton_all_to_all_forward(
+    padded_unsharded_flat_param: torch.Tensor,
     sharded_flat_param: torch.Tensor,
     global_placement: torch.Tensor,
     world_size: int,
@@ -864,10 +865,7 @@ def triton_all_to_all_forward(
     )
     
     # 2. Process received data using Triton kernel
-    padded_unsharded_flat_param = torch.empty(
-        (local_expert_num, world_size * expert_shard_size), 
-        dtype=dtype, device=device
-    )
+    # padded_unsharded_flat_param = padded_unsharded_flat_param.view(local_expert_num, world_size * expert_shard_size)
     
     # Prepare tensor for megatron all_to_all (expects single tensor)
     send_tensor = send_buffer.contiguous().view(-1)
@@ -897,12 +895,14 @@ def triton_all_to_all_forward(
     )
     
     # Reshape output
-    padded_unsharded_flat_param = padded_unsharded_flat_param.reshape(-1)
-    sharded_flat_param = sharded_flat_param.reshape(-1)
+    # padded_unsharded_flat_param = padded_unsharded_flat_param.view(-1)
+    # sharded_flat_param = sharded_flat_param.view(-1)
     
     return padded_unsharded_flat_param, sharded_flat_param
 
+@torch.no_grad()
 def triton_optimized_all_to_all_expert_weights(
+    padded_unsharded_flat_param: torch.Tensor,
     sharded_flat_param: torch.Tensor,
     global_placement: torch.Tensor,
     world_size: int,
@@ -912,7 +912,7 @@ def triton_optimized_all_to_all_expert_weights(
     """Complete Triton-optimized expert weights all_to_all operation.
     Maintains same API as original but uses Triton acceleration internally."""
     return triton_all_to_all_forward(
-        sharded_flat_param, global_placement, world_size, local_expert_num, process_group
+        padded_unsharded_flat_param, sharded_flat_param, global_placement, world_size, local_expert_num, process_group
     )
 
 DATA_BLOCK_SIZE = 4096
@@ -1045,6 +1045,7 @@ def _process_grad_all_to_all_recv_kernel(
 
 def triton_all_to_all_backward(
     padded_unsharded_grad: torch.Tensor,
+    new_sharded_grad: torch.Tensor,
     global_placement: torch.Tensor,
     world_size: int,
     global_expert_num: int,
@@ -1070,7 +1071,7 @@ def triton_all_to_all_backward(
     expert_shard_size = padded_unsharded_grad.numel() // (local_expert_num * world_size)
     
     # Reshape input
-    padded_unsharded_grad = padded_unsharded_grad.reshape(local_expert_num, -1)
+    # padded_unsharded_grad = padded_unsharded_grad.view(local_expert_num, -1)
     
     # 1. Prepare send data using Triton kernel
     send_shape = (world_size, local_expert_num, expert_shard_size)
@@ -1103,10 +1104,7 @@ def triton_all_to_all_backward(
     recv_buffer = recv_tensor.view(world_size, local_expert_num, expert_shard_size)
     
     # 4. Process received data and accumulate using Triton kernel
-    new_sharded_grad = torch.zeros(
-        (global_expert_num, expert_shard_size), 
-        dtype=dtype, device=device
-    )
+    # new_sharded_grad = new_sharded_grad.view(global_expert_num, -1)
     
     grid = (global_expert_num, num_blocks)
     
@@ -1127,13 +1125,15 @@ def triton_all_to_all_backward(
     )
     
     # Reshape output
-    padded_unsharded_grad = padded_unsharded_grad.reshape(-1)
-    new_sharded_grad = new_sharded_grad.reshape(-1)
+    # padded_unsharded_grad = padded_unsharded_grad.view(-1)
+    # new_sharded_grad = new_sharded_grad.view(-1)
     
     return padded_unsharded_grad, new_sharded_grad
 
+@torch.no_grad()
 def triton_optimized_all_to_all_expert_grads(
     padded_unsharded_grad: torch.Tensor,
+    new_sharded_grad: torch.Tensor,
     global_placement: torch.Tensor,
     world_size: int,
     global_expert_num: int,
@@ -1143,6 +1143,380 @@ def triton_optimized_all_to_all_expert_grads(
     """Complete Triton-optimized expert gradients all_to_all operation.
     Maintains same API as original but uses Triton acceleration internally."""
     return triton_all_to_all_backward(
-        padded_unsharded_grad, global_placement, world_size, 
+        padded_unsharded_grad, new_sharded_grad, global_placement, world_size, 
         global_expert_num, local_expert_num, process_group
+    )
+
+@triton.jit
+def _smart_routing_kernel(
+    # Input tensors
+    tokens_per_expert_ptr,  # [tp_size, ep_size, num_global_experts]
+    expert_locations_ptr,  # [origin_expert_num, max_locations] Expert replica locations, -1 for invalid
+    # Output tensors
+    output_ptr,  # [tp_size, ep_size, ep_size * num_local_experts]
+    # Configuration
+    tp_size: tl.constexpr,
+    ep_size: tl.constexpr,
+    num_global_experts: tl.constexpr,
+    num_local_experts: tl.constexpr,
+    max_locations: tl.constexpr,
+    gpus_per_node: tl.constexpr,
+    # Meta parameters
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Efficient smart routing kernel with intra-node priority and inter-node load balancing.
+    """
+    tp_idx = tl.program_id(0)
+    src_ep_rank = tl.program_id(1)
+    
+    src_node = src_ep_rank // gpus_per_node
+    
+    # Load token distribution for current source rank
+    tokens_offset = tp_idx * ep_size * num_global_experts + src_ep_rank * num_global_experts
+    tokens_base = tokens_per_expert_ptr + tokens_offset
+    output_base = output_ptr + tp_idx * ep_size * ep_size * num_local_experts + src_ep_rank * ep_size * num_local_experts
+    
+    # Process token allocation for each expert
+    for expert_id in range(num_global_experts):
+        tokens_for_expert = tl.load(tokens_base + expert_id)
+        if tokens_for_expert != 0:
+            expert_locations_base = expert_locations_ptr + expert_id * max_locations
+            intra_count = 0
+            inter_count = 0
+
+            for loc_idx in range(max_locations):
+                location = tl.load(expert_locations_base + loc_idx)
+                if location >= 0:
+                    target_node = location // gpus_per_node // num_local_experts
+                    
+                    if target_node == src_node:
+                        intra_count += 1
+                    else:
+                        inter_count += 1
+            
+            remaining_tokens = tokens_for_expert
+
+            if intra_count > 0:
+                tokens_per_location = remaining_tokens // intra_count
+                extra_tokens = remaining_tokens % intra_count
+                
+                assigned = 0
+                for loc_idx in range(max_locations):
+                    location = tl.load(expert_locations_base + loc_idx)
+                    if location >= 0:
+                        target_node = location // gpus_per_node // num_local_experts
+                        
+                        if target_node == src_node:
+                            tokens_to_assign = tokens_per_location
+                            if assigned < extra_tokens:
+                                tokens_to_assign += 1
+                            tl.atomic_add(output_base + location, tokens_to_assign)
+                            assigned += 1
+                remaining_tokens = 0
+            
+            if remaining_tokens > 0 and inter_count > 0:
+                tokens_per_location = remaining_tokens // inter_count
+                extra_tokens = remaining_tokens % inter_count
+                
+                assigned = 0
+                for loc_idx in range(max_locations):
+                    location = tl.load(expert_locations_base + loc_idx)
+                    if location >= 0:
+                        # target_node = location // gpus_per_node // num_local_experts
+                        tokens_to_assign = tokens_per_location
+                        if assigned < extra_tokens:
+                            tokens_to_assign += 1
+                        tl.atomic_add(output_base + location, tokens_to_assign)
+                        assigned += 1
+
+@triton.jit
+def _token_assignment_kernel(
+    # Input tensors
+    routing_map_ptr,  # [token_num, origin_expert_num]
+    probs_ptr,  # [token_num, origin_expert_num] 
+    expert_locations_ptr,  # [origin_expert_num, max_locations] Expert replica locations, -1 for invalid
+    copy_num_ptr,  # [num_global_experts]
+    # Output tensors
+    new_routing_map_ptr,  # [token_num, num_global_experts]
+    new_probs_ptr,  # [token_num, num_global_experts]
+    # Dimension parameters
+    token_num: tl.constexpr,
+    origin_expert_num: tl.constexpr,
+    num_global_experts: tl.constexpr,
+    max_locations: tl.constexpr,
+    # Block size
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Token assignment kernel using expert_locations tensor.
+    expert_locations[i, j] stores the location of the j-th replica of expert i, -1 for invalid.
+    """
+    token_id = tl.program_id(0)
+    
+    if token_id >= token_num:
+        return
+    
+    routing_base = routing_map_ptr + token_id * origin_expert_num
+    probs_base = probs_ptr + token_id * origin_expert_num
+    new_routing_base = new_routing_map_ptr + token_id * num_global_experts
+    new_probs_base = new_probs_ptr + token_id * num_global_experts
+    
+    # Process all expert assignments for current token
+    for expert_idx in range(origin_expert_num):
+        is_routed = tl.load(routing_base + expert_idx)
+        if is_routed:
+            
+            prob_val = tl.load(probs_base + expert_idx)
+            
+            # Try to find available location for this token
+            expert_locations_base = expert_locations_ptr + expert_idx * max_locations
+            
+            allocated = 0
+            for loc_idx in range(max_locations):
+                if allocated == 0:
+                    location = tl.load(expert_locations_base + loc_idx)            
+                    # Check if location is valid
+                    if location >= 0:
+                        # Atomic allocation attempt
+                        old_count = tl.atomic_add(copy_num_ptr + location, -1)
+                        if old_count > 0:
+                            # Allocation successful
+                            tl.store(new_routing_base + location, 1)
+                            tl.store(new_probs_base + location, prob_val)
+                            allocated = 1
+                        else:
+                            # Restore counter, location is full
+                            tl.atomic_add(copy_num_ptr + location, 1)
+
+@triton.jit
+def _gradient_mapping_kernel(
+    # Input tensors
+    grad_new_probs_ptr,         # [token_num, num_global_experts]
+    new_routing_map_ptr,        # [token_num, num_global_experts]
+    inverse_expert_map_ptr,     # [num_global_experts] - location to expert mapping
+    # Output tensors
+    grad_probs_ptr,             # [token_num, origin_expert_num]
+    # Dimensions
+    token_num: tl.constexpr,
+    origin_expert_num: tl.constexpr,
+    num_global_experts: tl.constexpr,
+    # Block size
+    BLOCK_SIZE: tl.constexpr,
+):
+    """
+    Map gradients from new_probs back to original probs using inverse expert mapping
+    Each token processed in parallel
+    """
+    token_idx = tl.program_id(0)
+    
+    if token_idx >= token_num:
+        return
+    
+    # Process each global expert location for this token
+    for location in range(num_global_experts):
+        # Get gradient from new_probs
+        map_value = tl.load(new_routing_map_ptr + token_idx * num_global_experts + location)
+        grad_value = tl.load(grad_new_probs_ptr + token_idx * num_global_experts + location)
+        
+        if map_value != 0:
+            # Find which original expert this location maps to
+            expert_idx = tl.load(inverse_expert_map_ptr + location)
+            tl.store(grad_probs_ptr + token_idx * origin_expert_num + expert_idx, grad_value)
+
+@torch.no_grad()
+def smart_routing_map_gpu(
+    num_global_tokens_per_expert: torch.Tensor,  # [tp_size, ep_size, num_global_experts]
+    expert_locations: torch.Tensor,  # [origin_expert_num, capacity * local_expert] expert replication location mapping, -1 means invalid
+    num_local_experts: int,
+    gpus_per_node: int = 8
+) -> torch.Tensor:
+    """
+    get_smart_routing_map function
+    """
+    tp_size, ep_size, num_global_experts = num_global_tokens_per_expert.shape
+    _, max_locations = expert_locations.shape
+    
+    device = num_global_tokens_per_expert.device
+    dtype = num_global_tokens_per_expert.dtype
+    
+    # output tensor
+    output = torch.zeros(
+        (tp_size, ep_size, ep_size * num_local_experts),
+        dtype=dtype,
+        device=device
+    )
+    
+    tokens_tensor = num_global_tokens_per_expert.contiguous()
+    expert_locations = expert_locations.contiguous()
+    grid = (tp_size, ep_size)
+    _smart_routing_kernel[grid](
+        tokens_tensor,
+        expert_locations,
+        output,
+        tp_size=tp_size,
+        ep_size=ep_size,
+        num_global_experts=num_global_experts,
+        num_local_experts=num_local_experts,
+        max_locations=max_locations,
+        gpus_per_node=gpus_per_node,
+        BLOCK_SIZE=1,
+    )
+    # torch.set_printoptions(threshold=100000000)
+    # print(f"{expert_locations},{tokens_tensor},{output}")
+    return output
+
+def new_routing_map_vectorized_gpu(
+    new_num_global_tokens_per_expert: torch.Tensor,  # [tp_size, ep_size, num_global_experts]
+    expert_locations: torch.Tensor,  # [origin_expert_num, capacity * local_expert] expert replication location mapping, -1 means invalid
+    routing_map: torch.Tensor,  # [token_num, origin_expert_num]
+    probs: torch.Tensor,  # [token_num, origin_expert_num]
+    tp_rank: int,
+    ep_rank: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    get_new_routing_map
+    """
+    tp_size, ep_size, num_global_experts = new_num_global_tokens_per_expert.shape
+    origin_expert_num = routing_map.size(1)
+    token_num = routing_map.size(0)
+    max_locations_per_expert = expert_locations.size(1)
+    
+    device = routing_map.device
+    
+    # output tensor
+    new_routing_map = torch.zeros(
+        (token_num, num_global_experts),
+        dtype=routing_map.dtype,
+        device=device
+    )
+    new_probs = torch.zeros(
+        (token_num, num_global_experts),
+        dtype=probs.dtype,
+        device=device
+    )
+    
+    copy_num = new_num_global_tokens_per_expert[tp_rank, ep_rank, :].clone()
+    
+    grid = (token_num,)
+    _token_assignment_kernel[grid](
+        routing_map.contiguous(),
+        probs.contiguous(),
+        expert_locations.contiguous(),
+        copy_num.contiguous(),
+        new_routing_map,
+        new_probs,
+        token_num=token_num,
+        origin_expert_num=origin_expert_num,
+        num_global_experts=num_global_experts,
+        max_locations=max_locations_per_expert,
+        BLOCK_SIZE=1,
+    )
+    return new_routing_map, new_probs
+
+class NewRoutingMapWithGradients(torch.autograd.Function):
+    """
+    Routing Map with Gradients, calc probs using inverse_expert_map
+    """
+    
+    @staticmethod
+    def forward(ctx, 
+                new_num_global_tokens_per_expert: torch.Tensor,
+                expert_locations: torch.Tensor,
+                inverse_expert_map: torch.Tensor,
+                routing_map: torch.Tensor,
+                probs: torch.Tensor,
+                tp_rank: int,
+                ep_rank: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        
+        ctx.tp_rank = tp_rank
+        ctx.ep_rank = ep_rank
+
+        tp_size, ep_size, num_global_experts = new_num_global_tokens_per_expert.shape
+        origin_expert_num = routing_map.size(1)
+        token_num = routing_map.size(0)
+        max_locations_per_expert = expert_locations.size(1)
+        
+        device = routing_map.device
+        
+        new_routing_map = torch.zeros(
+            (token_num, num_global_experts),
+            dtype=routing_map.dtype,
+            device=device
+        )
+        new_probs = torch.zeros(
+            (token_num, num_global_experts),
+            dtype=probs.dtype,
+            device=device
+        )
+        
+        copy_num = new_num_global_tokens_per_expert[tp_rank, ep_rank, :].clone()
+        
+        grid = (token_num,)
+        _token_assignment_kernel[grid](
+            routing_map.contiguous(),
+            probs.contiguous(),
+            expert_locations.contiguous(),
+            copy_num.contiguous(),
+            new_routing_map,
+            new_probs,
+            token_num=token_num,
+            origin_expert_num=origin_expert_num,
+            num_global_experts=num_global_experts,
+            max_locations=max_locations_per_expert,
+            BLOCK_SIZE=1,
+        )
+
+        ctx.save_for_backward(new_routing_map, inverse_expert_map)
+        ctx.shape = token_num, origin_expert_num
+        
+        return new_routing_map, new_probs
+    
+    @staticmethod
+    def backward(ctx, grad_new_routing_map, grad_new_probs):
+        """
+        Backward pass: map gradients from new_probs back to probs using inverse expert mapping
+        """
+        new_routing_map, inverse_expert_map = ctx.saved_tensors
+        token_num, origin_expert_num = ctx.shape
+
+        assert grad_new_probs is not None, "grad_new_probs is None"
+        # Get dimensions
+        num_global_experts = grad_new_probs.size(1)
+
+        # Initialize probs gradients
+        grad_probs = torch.zeros((token_num, origin_expert_num), device=grad_new_probs.device, dtype=grad_new_probs.dtype)
+        
+        # Use Triton kernel for gradient mapping
+        grid = (token_num,)
+        _gradient_mapping_kernel[grid](
+            grad_new_probs.contiguous(),
+            new_routing_map.contiguous(),
+            inverse_expert_map.contiguous(),
+            grad_probs,
+            token_num=token_num,
+            origin_expert_num=origin_expert_num,
+            num_global_experts=num_global_experts,
+            BLOCK_SIZE=1,
+        )
+        
+        return None, None, None, None, grad_probs, None, None
+
+def new_routing_map_with_gradients(
+    new_num_global_tokens_per_expert: torch.Tensor,
+    expert_locations: torch.Tensor,
+    inverse_expert_map: torch.Tensor,
+    routing_map: torch.Tensor,
+    probs: torch.Tensor,
+    tp_rank: int,
+    ep_rank: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    return NewRoutingMapWithGradients.apply(
+        new_num_global_tokens_per_expert,
+        expert_locations, 
+        inverse_expert_map, 
+        routing_map,
+        probs,
+        tp_rank,
+        ep_rank
     )

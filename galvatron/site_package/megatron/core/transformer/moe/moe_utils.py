@@ -697,3 +697,18 @@ def maybe_move_tensor_to_cpu(tensor, as_numpy=False, record_stream=False):
             tensor.record_stream(torch.cuda.current_stream())
         tensor = cpu_tensor
     return tensor
+
+def maybe_move_tensor_to_gpu(tensor, device, is_numpy=False):
+    """Move a tensor to GPU if it is on CPU.
+    Args:
+        tensor (torch.Tensor or None): The tensor to move to GPU.
+    """
+    if torch.is_tensor(tensor) and not tensor.is_cuda:
+        gpu_tensor = tensor.to(device, non_blocking=True)
+        tensor = gpu_tensor
+    elif is_numpy:
+        cpu_tensor = torch.tensor(tensor, dtype=torch.int32, device="cpu")
+        gpu_tensor = cpu_tensor.to(device, non_blocking=True)
+        tensor = gpu_tensor
+    return tensor
+

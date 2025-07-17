@@ -42,6 +42,7 @@ def construct_hybrid_parallel_model(model, model_config, training_args, hybrid_p
         layernorm_name=["LayerNorm", "norm", "MLPLayerNorm"],
         all_block_name=all_block_name,
         load_module_func=load_moe_module,
+        meta_init_buffer = False,
     )
     return hp_model
 

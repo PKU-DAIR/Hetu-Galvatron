@@ -5,7 +5,8 @@ import torch.distributed as dist
 
 from galvatron.core.runtime.moe.token_dispatcher import MoETokenDispatcher
 from galvatron.core import get_args
-from galvatron.core.runtime.moe.prefetch.async_linear_programming import submit_lp_optimization
+from galvatron.core.runtime.moe.prefetch.async_linear_programming import submit_lp_optimization, get_lp_optimization_result
+from galvatron.core.runtime.moe.fused_kernel import smart_routing_map_gpu, new_routing_map_vectorized_gpu, new_routing_map_with_gradients
 
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.moe.moe_utils import (
@@ -14,6 +15,7 @@ from megatron.core.transformer.moe.moe_utils import (
     permute,
     sort_chunks_by_idxs,
     unpermute,
+    maybe_move_tensor_to_gpu,
 )
 from megatron.core.tensor_parallel import (
     all_to_all,
@@ -32,7 +34,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
     """
 
     def __init__(
-        self, num_local_experts: int, local_expert_indices: List[int], global_expert_indices: torch.Tensor, config: TransformerConfig, ep_group: dist.ProcessGroup = None, tp_of_ep_group: dist.ProcessGroup = None, tp_and_ep_group: dist.ProcessGroup = None,
+        self, num_local_experts: int, local_expert_indices: List[int], global_expert_indices: torch.Tensor, global_expert_locations: torch.Tensor, inverse_expert_map: torch.Tensor, config: TransformerConfig, ep_group: dist.ProcessGroup = None, tp_of_ep_group: dist.ProcessGroup = None, tp_and_ep_group: dist.ProcessGroup = None,
         layer_number: int = None,
     ) -> None:
         """
@@ -53,6 +55,8 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         assert self.num_local_experts > 0, "Expected at least one expert"
         self.local_expert_indices = local_expert_indices
         self.global_expert_indices = global_expert_indices
+        self.global_expert_locations = global_expert_locations
+        self.inverse_expert_map = inverse_expert_map
         assert (
             len(self.local_expert_indices) == self.num_local_experts
         ), "Invalid local expert indices"
@@ -60,7 +64,6 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             assert (
                 self.local_expert_indices[i] == self.local_expert_indices[i + 1] - 1
             ), "local_expert_indices must be continous"
-
         # [ep_size]. Represents the number of tokens sent by the current rank to other
         # EP ranks.
         self.input_splits = None
@@ -106,6 +109,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         }
         self.cuda_dtoh_point = "before_permutation_1"
         self.cuda_dtoh_stream = torch.cuda.Stream()
+        self.cuda_htod_stream = torch.cuda.Stream()
 
         self.shared_experts = None
 
@@ -122,6 +126,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             "expert_capacity_per_device": self.num_local_experts
         }
         self.async_lp_task_id = None
+        self.need_to_sync = False
     
     def get_smart_routing_map(self, num_global_tokens_per_expert: torch.Tensor, global_expert_indices: torch.Tensor) -> torch.Tensor:
         """
@@ -394,6 +399,8 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         Returns:
             torch.Tensor: Tensor containing the number of tokens assigned to local expert.
         """
+        # if torch.cuda.current_device() == 0:
+        #     print(self.global_expert_indices)
         if self.drop_and_pad:
             # Drop and pad the input to capacity.
             num_tokens = routing_map.size(0) * self.config.moe_router_topk
@@ -420,7 +427,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             return num_tokens_per_local_expert
 
         # [num_experts], number of tokens assigned to each expert from the current rank's input.
-        num_local_tokens_per_expert = routing_map.sum(dim=0).long()
+        num_local_tokens_per_expert = routing_map.sum(dim=0).int()
 
         if self.config.moe_expert_capacity_factor is not None:
             # Drop tokens to capacity, no padding.
@@ -460,20 +467,15 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 self.history_num_global_tokens_per_expert.pop(0)
             
             # Submit async linear programming optimization task
-            if (self.async_lp_solver_config["enabled"] and 
-                submit_lp_optimization is not None):
+            if (self.async_lp_solver_config["enabled"]):
                 with torch.no_grad():
-                    total_num_global_tokens_per_expert = torch.sum(torch.stack(self.history_num_global_tokens_per_expert)[:,self.tp_rank], dim=0).cpu()
-                    self.async_lp_task_id = submit_lp_optimization(
-                        history_data=total_num_global_tokens_per_expert,
-                        layer_number=self.layer_number,
-                        computation_config_path=self.async_lp_solver_config["computation_config_path"],
-                        network_config_path=self.async_lp_solver_config["network_config_path"],
-                        expert_capacity_per_device=self.async_lp_solver_config["expert_capacity_per_device"]
+                    self.total_num_global_tokens_per_expert = torch.sum(torch.stack(self.history_num_global_tokens_per_expert)[:,self.tp_rank], dim=0)
+                self.cuda_dtoh_stream.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(self.cuda_dtoh_stream):
+                    # TODO: use MemcpyBatchAsync instead.
+                    self.total_num_global_tokens_per_expert = maybe_move_tensor_to_cpu(
+                        self.total_num_global_tokens_per_expert, as_numpy = True, record_stream=True
                     )
-                    # Pass task ID to FSDP layer for prefetch result retrieval
-                    self._notify_fsdp_layer_task_id(self.async_lp_task_id)
-                
             # with torch.no_grad():
             #     if torch.cuda.current_device() == 0:
             #         import os
@@ -482,9 +484,16 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             #         with open("result/router_log%s.log"%node_rank, "a") as f:
             #             f.write(data_str)
             #         self.iter += 1
-            num_global_tokens_per_expert = self.get_smart_routing_map(num_global_tokens_per_expert, self.global_expert_indices)
-            new_routing_map, new_probs = self.get_new_routing_map_vectorized(num_global_tokens_per_expert, self.global_expert_indices, routing_map, probs)
-
+            # torch.set_printoptions(threshold=1000000)
+            # old_num_global_tokens_per_expert = num_global_tokens_per_expert
+            # num_global_tokens_per_expert = self.get_smart_routing_map(num_global_tokens_per_expert, self.global_expert_indices)
+            # new_routing_map, new_probs = self.get_new_routing_map_vectorized(num_global_tokens_per_expert, self.global_expert_indices, routing_map, probs)
+            num_global_tokens_per_expert = smart_routing_map_gpu(num_global_tokens_per_expert, self.global_expert_locations, self.num_local_experts)
+            # new_routing_map, new_probs = new_routing_map_vectorized_gpu(num_global_tokens_per_expert, self.global_expert_locations, routing_map, probs, self.tp_rank, self.ep_rank)
+            new_routing_map, new_probs = new_routing_map_with_gradients(num_global_tokens_per_expert, self.global_expert_locations, self.inverse_expert_map, routing_map, probs, self.tp_rank, self.ep_rank)
+            
+            # if torch.cuda.current_device() == 0:
+            #     print(f"before {old_num_global_tokens_per_expert.reshape(-1,8).sum(dim=0)} after {num_global_tokens_per_expert.reshape(-1,8,2).sum(dim=(0,-1))} indices {self.global_expert_indices}")
             self.input_splits = num_global_tokens_per_expert[self.tp_rank, self.ep_rank].reshape(
                 self.ep_size, self.num_local_experts
             ).sum(axis=1)
@@ -535,9 +544,9 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         ), "cuda_sync_point must be after cuda_dtoh_point."
         return num_tokens_per_local_expert, new_routing_map, new_probs
     
-    def _notify_fsdp_layer_task_id(self, task_id):
+    def _notify_fsdp_layer_task_id(self, task_id, stream):
         """Notify FSDP layer about async LP task ID for prefetch result retrieval"""
-        self.fsdp_handle.set_lp_task_id(task_id)
+        self.fsdp_handle.set_lp_task_id(task_id, stream)
 
     def token_permutation(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
@@ -561,6 +570,10 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 - Permuted token embeddings for local experts.
                 - Number of tokens per expert.
         """
+        if (self.async_lp_solver_config["enabled"]):
+            if hasattr(self, "nxt_dispatcher"):
+                self.nxt_dispatcher._async_lp_prefetch_logic()
+        
         # Preprocess: Get the metadata for communication, permutation and computation operations.
         self.hidden_shape = hidden_states.shape
         self.probs = probs
@@ -718,6 +731,21 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         if self.shared_experts is not None:
             shared_expert_output = self.shared_experts.get_output()
             output += shared_expert_output
+        
+        if (self.async_lp_solver_config["enabled"]):
+            self.cuda_dtoh_stream.synchronize()
+            self.async_lp_task_id = submit_lp_optimization(
+                history_data=self.total_num_global_tokens_per_expert,
+                layer_number=self.layer_number,
+                computation_config_path=self.async_lp_solver_config["computation_config_path"],
+                network_config_path=self.async_lp_solver_config["network_config_path"],
+                expert_capacity_per_device=self.async_lp_solver_config["expert_capacity_per_device"]
+            )
+
+            if hasattr(self, "nxt_dispatcher"):
+                self.nxt_dispatcher.sync_htod()
+            # Pass task ID to FSDP layer for prefetch result retrieval
+            # self._notify_fsdp_layer_task_id(self.async_lp_task_id, self.cuda_htod_stream)
         return output, None
 
     def _maybe_update_cuda_sync_point(self, point: str):
@@ -770,3 +798,43 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 self.cuda_dtoh_stream.synchronize()
 
         return tokens_per_expert
+    def _async_lp_prefetch_logic(self):
+        """Async linear programming prefetch logic - get results from pending tasks"""
+        if self.async_lp_task_id is not None:
+            result = get_lp_optimization_result(self.async_lp_task_id, timeout=0.0)
+            if result is not None:
+                self._process_lp_result(result)
+                self.async_lp_task_id = None
+
+    def _process_lp_result(self, result):
+        """Process linear programming optimization result"""
+        if result.get("status") == "success":
+            # Here optimization results can be applied to routing strategy
+            # Actual implementation needs to be adjusted based on specific MoE router interface
+            # print(f"Linear programming optimization result: {result}")
+            self.global_expert_indices = result.get("expert_placement")
+            self.global_expert_locations = result.get("global_expert_locations")
+            self.inverse_expert_map = result.get("inverse_expert_map")
+            # self.cuda_htod_stream.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(self.cuda_htod_stream):
+                # TODO: use MemcpyBatchAsync instead.
+                self.global_expert_indices = maybe_move_tensor_to_gpu(
+                    self.global_expert_indices, torch.cuda.current_device()
+                )
+                self.global_expert_locations = maybe_move_tensor_to_gpu(
+                    self.global_expert_locations, torch.cuda.current_device()
+                )
+                self.inverse_expert_map = maybe_move_tensor_to_gpu(
+                    self.inverse_expert_map, torch.cuda.current_device()
+                )
+            self.need_to_sync = True
+        else:
+            assert False, f"Linear programming optimization failed {result}"
+    
+    def sync_htod(self):
+        if self.need_to_sync:
+            self.cuda_htod_stream.synchronize()
+            self.fsdp_handle.global_placement = self.global_expert_indices
+            self.fsdp_handle.global_expert_locations = self.global_expert_locations
+            self.fsdp_handle.inverse_expert_map = self.inverse_expert_map
+            self.need_to_sync = False

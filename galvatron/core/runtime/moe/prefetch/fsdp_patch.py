@@ -169,30 +169,36 @@ def new_init(self, *args, **kwargs):
     else:
         _new_init(self, *args, **kwargs)
 
-def _async_lp_prefetch_logic(self):
-    """Async linear programming prefetch logic - get results from pending tasks"""
-    if self.lp_pending_task_id is not None:
-        result = get_lp_optimization_result(self.lp_pending_task_id, timeout=0.0)
-        if result is not None:
-            self._process_lp_result(result)
-            self.lp_pending_task_id = None
+# def _async_lp_prefetch_logic(self):
+#     """Async linear programming prefetch logic - get results from pending tasks"""
+#     if self.lp_pending_task_id is not None:
+#         result = get_lp_optimization_result(self.lp_pending_task_id, timeout=0.0)
+#         if result is not None:
+#             self._process_lp_result(result)
+#             self.lp_pending_task_id = None
 
-def _process_lp_result(self, result):
-    """Process linear programming optimization result"""
-    if result.get("status") == "success":
-        # Here optimization results can be applied to routing strategy
-        # Actual implementation needs to be adjusted based on specific MoE router interface
-        # print(f"Linear programming optimization result: {result}")
-        self.global_placement = torch.tensor(result.get("expert_placement"), dtype=self.global_placement.dtype, device=self.global_placement.device)
-        self._fully_sharded_module.token_dispatcher.global_expert_indices = self.global_placement
+# def _process_lp_result(self, result):
+#     """Process linear programming optimization result"""
+#     if result.get("status") == "success":
+#         # Here optimization results can be applied to routing strategy
+#         # Actual implementation needs to be adjusted based on specific MoE router interface
+#         # print(f"Linear programming optimization result: {result}")
+#         self.global_placement = result.get("expert_placement")
+#         self.global_expert_locations = result.get("global_expert_locations")
+#         self.inverse_expert_map = result.get("inverse_expert_map")
+#         self._fully_sharded_module.token_dispatcher.global_expert_indices = self.global_placement
+#         self._fully_sharded_module.token_dispatcher.global_expert_locations = self.global_expert_locations
+#         self._fully_sharded_module.token_dispatcher.inverse_expert_map = self.inverse_expert_map
         
-    else:
-        assert False, f"Linear programming optimization failed {result}"
+#     else:
+#         assert False, f"Linear programming optimization failed {result}"
 
-def set_lp_task_id(self, task_id):
-    """Set async linear programming task ID from smart routing"""
-    if hasattr(self, 'lp_pending_task_id'):
-        self.lp_pending_task_id = task_id
+# def set_lp_task_id(self, task_id, stream):
+#     """Set async linear programming task ID from smart routing"""
+#     if hasattr(self, 'lp_pending_task_id'):
+#         self.lp_pending_task_id = task_id
+#     if not hasattr(self, 'htod_stream'):
+#         self.htod_stream = stream
 
 def new_init_flat_param_and_metadata(
     self,
@@ -515,6 +521,7 @@ def _all_to_all_flat_param_type2_triton(
     
     # Use Triton-optimized all_to_all
     padded_unsharded_flat_param, sharded_flat_param = triton_optimized_all_to_all_expert_weights(
+        padded_unsharded_flat_param,
         sharded_flat_param,
         self.global_placement,
         self.world_size,
@@ -524,7 +531,6 @@ def _all_to_all_flat_param_type2_triton(
     
     return padded_unsharded_flat_param, sharded_flat_param
 
-@torch.no_grad()
 def _all_to_all_grad_type2_triton(
     handle: FlatParamHandle,
     padded_unsharded_grad: Tensor,
@@ -535,6 +541,7 @@ def _all_to_all_grad_type2_triton(
     # Use Triton-optimized gradient all_to_all
     padded_unsharded_grad, new_sharded_grad = triton_optimized_all_to_all_expert_grads(
         padded_unsharded_grad,
+        new_sharded_grad,
         handle.global_placement,
         handle.world_size,
         handle.global_expert_num,
@@ -552,9 +559,12 @@ def new_all_gather_flat_param(
     if not self.is_moe_layer:
         return original_all_gather_flat_param(self, padded_unsharded_flat_param)
     
-    # Async linear programming prefetch logic
+    # Async linear programming prefetch logic for layer 0
     if self._training_state == HandleTrainingState.FORWARD:
-        self._async_lp_prefetch_logic()
+        if hasattr(self._fully_sharded_module, "token_dispatcher"):
+            self._fully_sharded_module.token_dispatcher._async_lp_prefetch_logic()
+            self._fully_sharded_module.token_dispatcher.sync_htod()
+        # self._async_lp_prefetch_logic()
     
     _p_assert(
         hasattr(self, "process_group") and hasattr(self, "world_size"),
@@ -596,8 +606,10 @@ def new_all_gather_flat_param(
 def _get_all_to_all_tensors(
     handle: FlatParamHandle, unsharded_grad: torch.Tensor
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    sharded_grad_size = unsharded_grad.numel() // handle.local_expert_num * handle.global_expert_num // handle.world_size
-    new_sharded_grad = torch.empty(sharded_grad_size, dtype=unsharded_grad.dtype, device=unsharded_grad.device)
+    chunks = list(unsharded_grad.chunk(handle.world_size * handle.local_expert_num // handle.global_expert_num))
+    new_sharded_grad = torch.empty_like(chunks[0])
+    # sharded_grad_size = unsharded_grad.numel() // handle.local_expert_num * handle.global_expert_num // handle.world_size
+    # new_sharded_grad = torch.empty(sharded_grad_size, dtype=unsharded_grad.dtype, device=unsharded_grad.device)
     return unsharded_grad, new_sharded_grad
 
 def new_reduce_grad(state: _FSDPState, handle: FlatParamHandle) -> None:
@@ -730,9 +742,9 @@ FlatParamHandle.flatten_tensors_into_flat_param = new_flatten_tensors_into_flat_
 FlatParamHandle._all_gather_flat_param = new_all_gather_flat_param
 FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type2_triton
 FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backward
-FlatParamHandle.set_lp_task_id = set_lp_task_id
-FlatParamHandle._async_lp_prefetch_logic = _async_lp_prefetch_logic
-FlatParamHandle._process_lp_result = _process_lp_result
+# FlatParamHandle.set_lp_task_id = set_lp_task_id
+# FlatParamHandle._async_lp_prefetch_logic = _async_lp_prefetch_logic
+# FlatParamHandle._process_lp_result = _process_lp_result
 
 # TODO: maybe improve this function to save memory? (same experts)
 # FlatParamHandle._use_unsharded_views = new_use_unsharded_views

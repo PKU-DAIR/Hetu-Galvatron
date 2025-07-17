@@ -150,14 +150,19 @@ class MoEMLP_tp(nn.Module):
             # TODO: Update solver to modify global_expert_indices
             self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
             self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
-            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
-                self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
-                layer_number = self.idx
-            )
-            # self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
-            #     self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+            self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device), -1, dtype=torch.int32, device=torch.cuda.current_device())
+            for i in range(self.num_global_experts):
+                self.global_expert_locations[i, :self.expert_capacity_per_device] = torch.arange(i, self.expert_parallel_size * self.expert_capacity_per_device, self.expert_parallel_size, dtype=torch.int32)
+            self.inverse_expert_map = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
+            self.inverse_expert_map = self.inverse_expert_map.reshape(-1,1).repeat(1, self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).contiguous()
+            # self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+            #     self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
             #     layer_number = self.idx
             # )
+            self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
+                self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, self.global_expert_locations, self.inverse_expert_map, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+                layer_number = self.idx
+            )
         else:
             self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
             if self.config.moe_token_dispatcher_type == "allgather":
@@ -331,6 +336,9 @@ def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc,
         )
         for i in range(len(layers_tp)-1):
             layers_tp[i].router.predict = layers_tp[i+1].router.router.predict
+            layers_tp[i].mlp.token_dispatcher.nxt_dispatcher = layers_tp[i+1].mlp.token_dispatcher
+        # layers_tp[len(layers_tp)-1].mlp.token_dispatcher.nxt_dispatcher = layers_tp[0].mlp.token_dispatcher
+
     setattr(model.model, "layers", layers_tp)
     
     megatron_config = core_transformer_config_from_args(get_args())

@@ -8,6 +8,7 @@ Variables: A[j,i] ∈ {0,1}, S[i,j,k] ≥ 0
 Constraints: expert placement, token conservation, capacity limits
 
 Implements: Linear Programming + Heuristic Algorithms
+Supports GPU tensor output for efficient integration with CUDA kernels
 """
 
 import json
@@ -15,7 +16,7 @@ import numpy as np
 import torch
 import random
 import time
-from typing import Dict, List, Tuple, Callable
+from typing import Dict, List, Tuple, Callable, Optional, Union
 from dataclasses import dataclass
 
 try:
@@ -659,25 +660,32 @@ class MoEOptimizer:
                 integer_parts[i] = 1
         
         current_total = sum(integer_parts)
+
+        # print(integer_parts, current_total, total_capacity)
         
         # If we exceed capacity, reduce from experts with smallest remainders
-        if current_total > total_capacity:
-            excess = current_total - total_capacity
+        while current_total > total_capacity:
             # Sort by remainder (ascending) to reduce from smallest remainders first
             sorted_indices = sorted(range(n_expert), key=lambda x: remainders[x])
-            for i in range(excess):
+            for i in range(n_expert):
                 idx = sorted_indices[i]
                 if integer_parts[idx] > 1:  # Don't reduce below 1
                     integer_parts[idx] -= 1
+                    current_total -= 1
+                    if current_total == total_capacity:
+                        break
         
         # If we have remaining capacity, assign to experts with largest remainders
-        elif current_total < total_capacity:
+        while current_total < total_capacity:
             remaining = total_capacity - current_total
             # Sort by remainder (descending) to assign to largest remainders first
             sorted_indices = sorted(range(n_expert), key=lambda x: remainders[x], reverse=True)
-            for i in range(remaining):
-                idx = sorted_indices[i % n_expert]  # Cycle if needed
+            for i in range(n_expert):
+                idx = sorted_indices[i]  # Cycle if needed
                 integer_parts[idx] += 1
+                current_total += 1
+                if current_total == total_capacity:
+                    break
         
         # Validation
         assert sum(integer_parts) == total_capacity, f"Total replicas {sum(integer_parts)} != capacity {total_capacity}"
