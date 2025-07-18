@@ -20,7 +20,7 @@ from galvatron.core.runtime.moe.token_dispatcher import (
     MoEFlexTokenDispatcher,
 )
 from galvatron.core.runtime.moe.smart_routing import MoEAlltoAllSmartTokenDispatcher
-
+import moe_all_to_all_kernels
 
 class MoEAttention_tp(nn.Module):
     def __init__(self, config, layer_number, tp_group=None, sp_group=None):
@@ -245,6 +245,9 @@ class MoELayer_tp(nn.Module):
         self.router = MoERouter(layer_number)
         self.mlp = MoEMLP_tp(config, layer_number, tp_group, ep_group, tp_of_ep_group, tp_and_ep_group)
         self.idx = layer_number
+        rank = torch.distributed.get_rank(ep_group)
+        world_size = torch.distributed.get_world_size(ep_group)
+        moe_all_to_all_kernels.init_nccl_comm(ep_group, rank, world_size)
 
     def forward(
         self,

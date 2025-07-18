@@ -815,17 +815,20 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             self.global_expert_indices = result.get("expert_placement")
             self.global_expert_locations = result.get("global_expert_locations")
             self.inverse_expert_map = result.get("inverse_expert_map")
+            self.fsdp_handle.global_placement_cpu = self.global_expert_indices
+            # self.fsdp_handle.global_expert_locations_cpu = self.global_expert_locations
+            # self.fsdp_handle.inverse_expert_map_cpu = self.inverse_expert_map
             # self.cuda_htod_stream.wait_stream(torch.cuda.current_stream())
             with torch.cuda.stream(self.cuda_htod_stream):
                 # TODO: use MemcpyBatchAsync instead.
                 self.global_expert_indices = maybe_move_tensor_to_gpu(
-                    self.global_expert_indices, torch.cuda.current_device()
+                    self.global_expert_indices, torch.cuda.current_device(), True
                 )
                 self.global_expert_locations = maybe_move_tensor_to_gpu(
-                    self.global_expert_locations, torch.cuda.current_device()
+                    self.global_expert_locations, torch.cuda.current_device(), True
                 )
                 self.inverse_expert_map = maybe_move_tensor_to_gpu(
-                    self.inverse_expert_map, torch.cuda.current_device()
+                    self.inverse_expert_map, torch.cuda.current_device(), True
                 )
             self.need_to_sync = True
         else:

@@ -5,7 +5,7 @@
 #include <vector>
 #include <limits>
 #include <tuple>
-#include<algorithm>
+#include <algorithm>
 
 namespace py = pybind11;
 

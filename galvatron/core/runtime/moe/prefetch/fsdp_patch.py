@@ -46,6 +46,8 @@ from galvatron.core.runtime.moe.prefetch.async_linear_programming import (
 from galvatron.core.runtime.moe.fused_kernel import (
     triton_optimized_all_to_all_expert_weights,
     triton_optimized_all_to_all_expert_grads,
+    cuda_optimized_all_to_all_expert_weights,
+    cuda_optimized_all_to_all_expert_grads
 )
 
 log = logging.getLogger(__name__)
@@ -161,6 +163,7 @@ def new_init(self, *args, **kwargs):
         self.local_expert_num = _fully_sharded_module.expert_capacity_per_device
         # [world_size * local_expert_num]
         self.global_placement = _fully_sharded_module.global_expert_indices
+        self.global_placement_cpu = _fully_sharded_module.global_expert_indices.to("cpu")
     else:
         self.is_moe_layer = False
 
@@ -531,6 +534,28 @@ def _all_to_all_flat_param_type2_triton(
     
     return padded_unsharded_flat_param, sharded_flat_param
 
+def _all_to_all_flat_param_type3_cuda(
+    self,
+    padded_unsharded_flat_param: Tensor,
+    sharded_flat_param: Tensor,
+    process_group,
+):
+    """CUDA-optimized expert weights all_to_all operation"""
+    sharded_flat_param = sharded_flat_param.contiguous()
+    # .reshape(self.global_expert_num, -1)
+    
+    # Use Triton-optimized all_to_all
+    padded_unsharded_flat_param, sharded_flat_param = cuda_optimized_all_to_all_expert_weights(
+        padded_unsharded_flat_param,
+        sharded_flat_param,
+        self.global_placement_cpu,
+        self.world_size,
+        self.local_expert_num,
+        process_group
+    )
+    
+    return padded_unsharded_flat_param, sharded_flat_param
+
 def _all_to_all_grad_type2_triton(
     handle: FlatParamHandle,
     padded_unsharded_grad: Tensor,
@@ -551,6 +576,24 @@ def _all_to_all_grad_type2_triton(
     
     return padded_unsharded_grad, new_sharded_grad
 
+def _all_to_all_grad_type3_cuda(
+    handle: FlatParamHandle,
+    padded_unsharded_grad: Tensor,
+    new_sharded_grad: Tensor,
+    process_group,
+):
+    """CUDA-optimized expert gradient all_to_all operation"""
+    padded_unsharded_grad, new_sharded_grad = triton_optimized_all_to_all_expert_grads(
+        padded_unsharded_grad,
+        new_sharded_grad,
+        handle.global_placement_cpu,
+        handle.world_size,
+        handle.global_expert_num,
+        handle.local_expert_num,
+        process_group
+    )
+    
+    return padded_unsharded_grad, new_sharded_grad
 
 def new_all_gather_flat_param(
     self,
@@ -740,7 +783,7 @@ FlatParamHandle._init_flat_param_and_metadata = new_init_flat_param_and_metadata
 FlatParamHandle.init_flat_param_attributes = new_init_flat_param_attributes
 FlatParamHandle.flatten_tensors_into_flat_param = new_flatten_tensors_into_flat_param
 FlatParamHandle._all_gather_flat_param = new_all_gather_flat_param
-FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type2_triton
+FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type3_cuda
 FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backward
 # FlatParamHandle.set_lp_task_id = set_lp_task_id
 # FlatParamHandle._async_lp_prefetch_logic = _async_lp_prefetch_logic
@@ -750,4 +793,4 @@ FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backwar
 # FlatParamHandle._use_unsharded_views = new_use_unsharded_views
 
 _runtime_utils._reduce_grad = new_reduce_grad
-_all_to_all_grad = _all_to_all_grad_type2_triton
+_all_to_all_grad = _all_to_all_grad_type3_cuda

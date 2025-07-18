@@ -2,6 +2,7 @@ from setuptools import setup, find_packages, Extension
 from setuptools.command.install import install
 from setuptools.command.develop import develop
 from setuptools.command.build_ext import build_ext
+from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import pathlib
 import os
 
@@ -12,6 +13,7 @@ except ImportError:
     
 
 FLASH_ATTN_INSTALL = os.getenv("GALVATRON_FLASH_ATTN_INSTALL", "FALSE") == "TRUE"
+MOE_KERNELS_INSTALL = os.getenv("GALVATRON_MOE_KERNELS_INSTALL", "TRUE") == "TRUE"
 
 here = pathlib.Path(__file__).parent.resolve()
 
@@ -24,7 +26,7 @@ class CustomInstall(install):
             cwd = pathlib.Path.cwd()
             
             if fused_dense_lib is None or dropout_layer_norm is None or rotary_emb is None or xentropy_cuda_lib is None:
-                self.spawn(["bash", cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh"])
+                self.spawn(["bash", str(cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh")])
 
 class CustomDevelop(develop):
     def run(self):
@@ -35,25 +37,70 @@ class CustomDevelop(develop):
             cwd = pathlib.Path.cwd()
             
             if fused_dense_lib is None or dropout_layer_norm is None or rotary_emb is None or xentropy_cuda_lib is None:
-                self.spawn(["bash", cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh"])
+                self.spawn(["bash", str(cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh")])
 
 
 class CustomBuildExt(build_ext):
     def run(self):
         import pybind11
 
-        self.include_dirs.append(pybind11.get_include())
+        # Add pybind11 include directory to all extensions
+        for ext in self.extensions:
+            if hasattr(ext, 'include_dirs'):
+                ext.include_dirs.append(pybind11.get_include())
+            else:
+                ext.include_dirs = [pybind11.get_include()]
 
         build_ext.run(self)
 
+class CustomBuildExtension(BuildExtension):
+    """Custom BuildExtension that adds pybind11 include directories"""
+    
+    def run(self):
+        import pybind11
+        
+        # Add pybind11 include directory to all extensions
+        for ext in self.extensions:
+            if hasattr(ext, 'include_dirs'):
+                ext.include_dirs.append(pybind11.get_include())
+            else:
+                ext.include_dirs = [pybind11.get_include()]
+        
+        # Call parent class run method
+        super().run()
 
-# Define the extension module
+
+# Define the extension modules
 dp_core_ext = Extension(
     'galvatron_dp_core',
     sources=['csrc/dp_core.cpp'],
     extra_compile_args=['-O3', '-Wall', '-shared', '-std=c++11', '-fPIC'],
     language='c++'
 )
+
+# MoE all_to_all kernels extension
+moe_kernels_ext = None
+if MOE_KERNELS_INSTALL:
+    try:
+        import torch
+        if torch.cuda.is_available():
+            # CUDA extension for MoE kernels
+            moe_kernels_ext = CUDAExtension(
+                name='moe_all_to_all_kernels',
+                sources=[
+                    'csrc/moe_all_to_all_binding.cpp',
+                    'csrc/moe_all_to_all_kernels.cu'
+                ],
+                extra_compile_args={
+                    'cxx': ['-O3', '-std=c++17', '-DUSE_C10D_NCCL'],
+                    'nvcc': ['-O3', '-std=c++17', '-DUSE_C10D_NCCL']
+                },
+                include_dirs=torch.utils.cpp_extension.include_paths(),
+                libraries=['nccl']
+            )
+    except ImportError:
+        print("Warning: PyTorch not available, skipping MoE kernels compilation")
+        moe_kernels_ext = None
 
 _deps = [
     "torch>=2.0.1",
@@ -102,10 +149,11 @@ setup(
     cmdclass={
         "install": CustomInstall,
         "develop": CustomDevelop,
-        "build_ext": CustomBuildExt
+        "build_ext": CustomBuildExtension
     },
     install_requires=_deps,
     setup_requires=["pybind11>=2.9.1"],
-    ext_modules=[dp_core_ext],
+    ext_modules=[dp_core_ext] + ([moe_kernels_ext] if moe_kernels_ext else []),
     data_files=data_files
 )
+

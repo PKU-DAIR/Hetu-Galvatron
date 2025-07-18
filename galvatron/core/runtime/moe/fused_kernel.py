@@ -1520,3 +1520,116 @@ def new_routing_map_with_gradients(
         tp_rank,
         ep_rank
     )
+
+import moe_all_to_all_kernels
+from megatron.core.parallel_state import get_global_memory_buffer
+
+def cuda_optimized_all_to_all_expert_weights(
+    padded_unsharded_flat_param: torch.Tensor,
+    sharded_flat_param: torch.Tensor,
+    global_placement: torch.Tensor,
+    world_size: int,
+    local_expert_num: int,
+    process_group,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """CUDA-optimized expert weights all_to_all operation using our custom kernels.
+    
+    Args:
+        padded_unsharded_flat_param: Output tensor for padded unsharded params
+        sharded_flat_param: Input sharded flat params [global_expert_num, expert_shard_size]
+        global_placement: Global expert placement [world_size, local_expert_num]
+        world_size: World size
+        local_expert_num: Number of local experts
+        process_group: Process group
+    
+    Returns:
+        padded_unsharded_flat_param: Padded unsharded params
+        sharded_flat_param: Reshaped sharded params
+    """
+    
+    global_expert_num, expert_shard_size = sharded_flat_param.shape
+    device = sharded_flat_param.device
+    dtype = sharded_flat_param.dtype
+
+    stream = torch.cuda.current_stream(device).cuda_stream
+
+    moe_all_to_all_kernels.moe_nccl_forward(
+        sharded_flat_param,
+        global_placement,
+        padded_unsharded_flat_param,
+        world_size,
+        global_expert_num,
+        local_expert_num,
+        expert_shard_size,
+        process_group,
+        stream
+    )
+    
+    return padded_unsharded_flat_param, sharded_flat_param
+
+def cuda_optimized_all_to_all_expert_grads(
+    padded_unsharded_grad: torch.Tensor,
+    new_sharded_grad: torch.Tensor,
+    global_placement: torch.Tensor,
+    world_size: int,
+    global_expert_num: int,
+    local_expert_num: int,
+    process_group,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """CUDA-optimized expert gradients all_to_all operation using our custom kernels.
+    
+    Args:
+        padded_unsharded_grad: Padded unsharded gradients
+        new_sharded_grad: Output tensor for new sharded gradients
+        global_placement: Global expert placement
+        world_size: World size
+        global_expert_num: Number of global experts
+        local_expert_num: Number of local experts
+        process_group: Process group
+    
+    Returns:
+        padded_unsharded_grad: Reshaped gradients
+        new_sharded_grad: New sharded gradients
+    """
+    device = padded_unsharded_grad.device
+    dtype = padded_unsharded_grad.dtype
+    expert_shard_size = padded_unsharded_grad.numel() // (local_expert_num * world_size)
+
+    recv_buffer = get_global_memory_buffer().get_tensor(world_size * local_expert_num * expert_shard_size, padded_unsharded_grad.dtype, "p2p")
+
+    # 获取当前CUDA stream
+    stream = torch.cuda.current_stream(device).cuda_stream
+    
+    # 调用CUDA kernel进行反向传播
+    moe_all_to_all_kernels.moe_nccl_backward(
+        padded_unsharded_grad,
+        global_placement,
+        recv_buffer,
+        world_size,
+        global_expert_num,
+        local_expert_num,
+        expert_shard_size,
+        process_group,
+        stream
+    )
+
+    num_blocks = triton.cdiv(expert_shard_size, DATA_BLOCK_SIZE)
+    grid = (global_expert_num, num_blocks)
+    
+    _process_grad_all_to_all_recv_kernel[grid](
+        recv_buffer,
+        global_placement.view(-1),
+        new_sharded_grad,
+        world_size,
+        global_expert_num,
+        local_expert_num,
+        expert_shard_size,
+        # Stride information
+        local_expert_num * expert_shard_size,  # stride_recv_rank
+        expert_shard_size,                     # stride_recv_expert
+        1,                                     # stride_recv_shard
+        expert_shard_size,                     # stride_output_expert
+        1,                                     # stride_output_shard
+    )
+    
+    return padded_unsharded_grad, new_sharded_grad
