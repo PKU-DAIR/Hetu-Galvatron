@@ -148,7 +148,7 @@ def _new_init(
             submodule, recurse=False
         ):
             submodule._parameters[param_name] = None
-    self.flat_param._unpadded_unsharded_size = torch.Size((self.flat_param._unpadded_unsharded_size[0] // self.world_size,))
+    # self.flat_param._unpadded_unsharded_size = torch.Size((self.flat_param._unpadded_unsharded_size[0] // self.world_size,))
 
     self._fully_sharded_module.token_dispatcher.fsdp_handle = self
     self.lp_pending_task_id = None
@@ -349,6 +349,7 @@ def new_init_flat_param_and_metadata(
         # Scaling _unpadded_unsharded_size
         size_list = list(self.flat_param._unpadded_unsharded_size)
         size_list[0] *= self.local_expert_num
+        size_list[0] //= self.global_expert_num
         self.flat_param._unpadded_unsharded_size = torch.Size(size_list)
 
 def new_init_flat_param_attributes(self) -> None:
@@ -551,6 +552,7 @@ def _all_to_all_flat_param_type3_cuda(
         self.global_placement_cpu,
         self.world_size,
         self.local_expert_num,
+        self.global_expert_num,
         process_group
     )
     
@@ -583,10 +585,11 @@ def _all_to_all_grad_type3_cuda(
     process_group,
 ):
     """CUDA-optimized expert gradient all_to_all operation"""
-    padded_unsharded_grad, new_sharded_grad = triton_optimized_all_to_all_expert_grads(
+    padded_unsharded_grad, new_sharded_grad = cuda_optimized_all_to_all_expert_grads(
         padded_unsharded_grad,
         new_sharded_grad,
         handle.global_placement_cpu,
+        handle.global_placement,
         handle.world_size,
         handle.global_expert_num,
         handle.local_expert_num,

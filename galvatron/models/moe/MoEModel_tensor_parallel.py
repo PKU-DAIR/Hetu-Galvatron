@@ -128,7 +128,7 @@ class MoEMLP_tp(nn.Module):
         self.expert_parallel_size = mpu.get_expert_model_parallel_world_size(self.ep_group)
         assert self.expert_parallel_size > 0, "Expected non-negative expert parallel size"
 
-        assert self.config.num_moe_experts % self.expert_parallel_size == 0
+        # assert self.config.num_moe_experts % self.expert_parallel_size == 0
         self.num_global_experts = self.config.num_moe_experts
         self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
         self.expert_capacity_per_device = args.expert_capacity_per_device
@@ -152,7 +152,7 @@ class MoEMLP_tp(nn.Module):
             self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
             self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device), -1, dtype=torch.int32, device=torch.cuda.current_device())
             for i in range(self.num_global_experts):
-                self.global_expert_locations[i, :self.expert_capacity_per_device] = torch.arange(i, self.expert_parallel_size * self.expert_capacity_per_device, self.expert_parallel_size, dtype=torch.int32)
+                self.global_expert_locations[i, :(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts)] = torch.arange(i, self.expert_parallel_size * self.expert_capacity_per_device, self.num_global_experts, dtype=torch.int32)
             self.inverse_expert_map = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
             self.inverse_expert_map = self.inverse_expert_map.reshape(-1,1).repeat(1, self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).contiguous()
             # self.token_dispatcher = MoEAlltoAllTokenDispatcher(
@@ -245,9 +245,9 @@ class MoELayer_tp(nn.Module):
         self.router = MoERouter(layer_number)
         self.mlp = MoEMLP_tp(config, layer_number, tp_group, ep_group, tp_of_ep_group, tp_and_ep_group)
         self.idx = layer_number
-        rank = torch.distributed.get_rank(ep_group)
-        world_size = torch.distributed.get_world_size(ep_group)
-        moe_all_to_all_kernels.init_nccl_comm(ep_group, rank, world_size)
+        rank = torch.distributed.get_rank(ep_group.group)
+        world_size = torch.distributed.get_world_size(ep_group.group)
+        moe_all_to_all_kernels.init_nccl_comm(ep_group.group, rank, world_size)
 
     def forward(
         self,

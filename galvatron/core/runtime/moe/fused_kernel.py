@@ -1530,6 +1530,7 @@ def cuda_optimized_all_to_all_expert_weights(
     global_placement: torch.Tensor,
     world_size: int,
     local_expert_num: int,
+    global_expert_num: int,
     process_group,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """CUDA-optimized expert weights all_to_all operation using our custom kernels.
@@ -1547,7 +1548,7 @@ def cuda_optimized_all_to_all_expert_weights(
         sharded_flat_param: Reshaped sharded params
     """
     
-    global_expert_num, expert_shard_size = sharded_flat_param.shape
+    expert_shard_size = sharded_flat_param.numel() // global_expert_num
     device = sharded_flat_param.device
     dtype = sharded_flat_param.dtype
 
@@ -1561,8 +1562,6 @@ def cuda_optimized_all_to_all_expert_weights(
         global_expert_num,
         local_expert_num,
         expert_shard_size,
-        process_group,
-        stream
     )
     
     return padded_unsharded_flat_param, sharded_flat_param
@@ -1570,6 +1569,7 @@ def cuda_optimized_all_to_all_expert_weights(
 def cuda_optimized_all_to_all_expert_grads(
     padded_unsharded_grad: torch.Tensor,
     new_sharded_grad: torch.Tensor,
+    global_placement_cpu: torch.Tensor,
     global_placement: torch.Tensor,
     world_size: int,
     global_expert_num: int,
@@ -1595,7 +1595,7 @@ def cuda_optimized_all_to_all_expert_grads(
     dtype = padded_unsharded_grad.dtype
     expert_shard_size = padded_unsharded_grad.numel() // (local_expert_num * world_size)
 
-    recv_buffer = get_global_memory_buffer().get_tensor(world_size * local_expert_num * expert_shard_size, padded_unsharded_grad.dtype, "p2p")
+    recv_buffer = get_global_memory_buffer().get_tensor([world_size * local_expert_num * expert_shard_size], padded_unsharded_grad.dtype, "p2p")
 
     # 获取当前CUDA stream
     stream = torch.cuda.current_stream(device).cuda_stream
@@ -1603,14 +1603,12 @@ def cuda_optimized_all_to_all_expert_grads(
     # 调用CUDA kernel进行反向传播
     moe_all_to_all_kernels.moe_nccl_backward(
         padded_unsharded_grad,
-        global_placement,
+        global_placement_cpu,
         recv_buffer,
         world_size,
         global_expert_num,
         local_expert_num,
         expert_shard_size,
-        process_group,
-        stream
     )
 
     num_blocks = triton.cdiv(expert_shard_size, DATA_BLOCK_SIZE)
