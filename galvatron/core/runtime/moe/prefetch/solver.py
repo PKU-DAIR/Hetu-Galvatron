@@ -18,6 +18,7 @@ import random
 import time
 from typing import Dict, List, Tuple, Callable, Optional, Union
 from dataclasses import dataclass
+import heapq
 
 try:
     from pyscipopt import Model, quicksum
@@ -241,7 +242,8 @@ class MoEOptimizer:
         expert_loads = [sum(E[i][j] for i in range(n_device)) for j in range(n_expert)]
         
         # Use precise allocation to fully utilize capacity
-        expert_replicas = self._allocate_expert_replicas_precise(expert_loads, total_capacity)
+        # expert_replicas = self._allocate_expert_replicas_precise(expert_loads, total_capacity)
+        expert_replicas = self.new_allocate_expert_replicas_precise(expert_loads, n_device, C_e)
         
         # Step 2: Create expanded expert assignment matrix and track replica capacities
         A = np.zeros((n_expert, n_device))
@@ -261,6 +263,7 @@ class MoEOptimizer:
             expert_replica_capacities[expert] = {}
         
         # Round-robin assignment
+        node_num = n_device // 8
         max_replicas = max(expert_replicas)
         for round_num in range(max_replicas):
             # Sort experts by load (descending) for this round
@@ -277,15 +280,16 @@ class MoEOptimizer:
                 if available_devices:
                     # Priority strategy: distribute replicas across different nodes first
                     # Get nodes that already have this expert
-                    existing_nodes = set()
+                    existing_nodes = [0] * node_num
                     for dev in range(n_device):
                         if A[expert, dev] == 1:
-                            existing_nodes.add(self.node_func(dev))
-                    
+                            existing_nodes[self.node_func(dev)] += 1
+                
+                    min_load = min(existing_nodes)
                     # Find available devices in nodes that don't have this expert yet
                     new_node_devices = [i for i in available_devices 
-                                      if self.node_func(i) not in existing_nodes]
-                    
+                                      if existing_nodes[self.node_func(i)] == min_load]
+
                     if new_node_devices:
                         # Choose device with minimum load from new nodes
                         best_device = min(new_node_devices, key=lambda x: device_loads[x])
@@ -319,288 +323,7 @@ class MoEOptimizer:
             A_res.append(tmp)
         
         return 0, 0, A_res # A, S, total_time
-    
-    def simulated_annealing_heuristic(self, *args, initial_temp=1000.0, cooling_rate=0.95, min_temp=1.0) -> Tuple:
-        """Simulated annealing heuristic with expert replication"""
-        n_device, n_expert, E, C_e, M_token = args
-        
-        # Determine expert replication strategy
-        total_capacity = n_device * C_e
-        expert_loads = [sum(E[i][j] for i in range(n_device)) for j in range(n_expert)]
-        total_load = sum(expert_loads)
-        
-        expert_replicas = self._allocate_expert_replicas_precise(expert_loads, total_capacity)
-        
-        def random_neighbor(A):
-            neighbor = A.copy()
-            operation = random.choice(['swap_experts', 'replace_expert'])
-            
-            if operation == 'swap_experts':
-                # Operation 1: Swap two experts between two devices
-                devices_with_experts = [i for i in range(n_device) if neighbor[:, i].sum() > 0]
-                
-                if len(devices_with_experts) >= 2:
-                    device1, device2 = random.sample(devices_with_experts, 2)
-                    experts_on_device1 = [j for j in range(n_expert) if neighbor[j, device1] == 1]
-                    experts_on_device2 = [j for j in range(n_expert) if neighbor[j, device2] == 1]
-                    
-                    if experts_on_device1 and experts_on_device2:
-                        expert1 = random.choice(experts_on_device1)
-                        expert2 = random.choice(experts_on_device2)
-                        
-                        # Perform swap
-                        neighbor[expert1, device1] = 0
-                        neighbor[expert2, device2] = 0
-                        neighbor[expert1, device2] = 1
-                        neighbor[expert2, device1] = 1
-                        
-            elif operation == 'replace_expert':
-                # Operation 2: Replace one expert with another on same device
-                devices_with_experts = [i for i in range(n_device) if neighbor[:, i].sum() > 0]
-                
-                if devices_with_experts:
-                    device = random.choice(devices_with_experts)
-                    experts_on_device = [j for j in range(n_expert) if neighbor[j, device] == 1]
-                    experts_not_on_device = [j for j in range(n_expert) if neighbor[j, device] == 0]
-                    
-                    if experts_on_device and experts_not_on_device:
-                        expert_to_remove = random.choice(experts_on_device)
-                        expert_to_add = random.choice(experts_not_on_device)
-                        
-                        neighbor[expert_to_remove, device] = 0
-                        neighbor[expert_to_add, device] = 1
-            
-            return neighbor
-        
-        def cost_function(A):
-            # Rebuild expert replica capacities from assignment matrix
-            expert_replica_capacities = self._rebuild_expert_capacities(A, expert_loads, expert_replicas, n_device, n_expert)
-            S = self._generate_smart_routing_with_capacities(n_device, n_expert, E, A, expert_replica_capacities)
-            return self._calculate_total_time(n_device, n_expert, S, M_token)
-        
-        # Initial solution using greedy
-        current_A, _, _ = self.greedy_load_balancing_heuristic(*args)
-        current_cost = cost_function(current_A)
-        best_A = current_A.copy()
-        best_cost = current_cost
-        
-        temp = initial_temp
-        
-        while temp > min_temp:
-            neighbor_A = random_neighbor(current_A)
-            neighbor_cost = cost_function(neighbor_A)
-            
-            if neighbor_cost < current_cost or random.random() < np.exp(-(neighbor_cost - current_cost) / temp):
-                current_A = neighbor_A
-                current_cost = neighbor_cost
-                
-                if current_cost < best_cost:
-                    best_A = current_A.copy()
-                    best_cost = current_cost
-            
-            temp *= cooling_rate
-        
-        # Generate final routing with capacities
-        best_expert_replica_capacities = self._rebuild_expert_capacities(best_A, expert_loads, expert_replicas, n_device, n_expert)
-        S = self._generate_smart_routing_with_capacities(n_device, n_expert, E, best_A, best_expert_replica_capacities)
-        
-        return best_A, S, best_cost
-    
-    def _rebuild_expert_capacities(self, A: np.ndarray, expert_loads: List[int], expert_replicas: List[int], 
-                                   n_device: int, n_expert: int) -> dict:
-        """Rebuild expert replica capacities from assignment matrix"""
-        expert_replica_capacities = {}
-        
-        for expert in range(n_expert):
-            expert_replica_capacities[expert] = {}
-            
-            # Find devices assigned to this expert
-            assigned_devices = [i for i in range(n_device) if A[expert, i] == 1]
-            
-            if assigned_devices:
-                # Distribute expert load among assigned replicas
-                expert_load = expert_loads[expert]
-                replica_loads = self._distribute_expert_load_precise(expert_load, len(assigned_devices))
-                
-                # Assign loads to devices
-                for device_idx, device in enumerate(assigned_devices):
-                    expert_replica_capacities[expert][device] = replica_loads[device_idx]
-        
-        return expert_replica_capacities
-    
-    def eplb_heuristic(self, *args) -> Tuple:
-        """Expert Parallel Load Balancer (EPLB) heuristic with expert replication"""
-        n_device, n_expert, E, C_e, M_token = args
-        
-        # Step 1: Determine expert replication strategy
-        total_capacity = n_device * C_e
-        expert_loads = [sum(E[i][j] for i in range(n_device)) for j in range(n_expert)]
-        total_load = sum(expert_loads)
-        
-        expert_replicas = []
-        for j in range(n_expert):
-            base_replicas = max(1, int(expert_loads[j] / total_load * total_capacity))
-            expert_replicas.append(min(base_replicas, total_capacity // n_expert + 1))
-        
-        total_replicas = sum(expert_replicas)
-        if total_replicas > total_capacity:
-            scale = total_capacity / total_replicas
-            expert_replicas = [max(1, int(r * scale)) for r in expert_replicas]
-        
-        # Step 2: EPLB-style assignment with replication
-        A = np.zeros((n_expert, n_device))
-        device_expert_count = [0] * n_device
-        device_loads = [0.0] * n_device
-        
-        # Sort experts by load (descending)
-        sorted_experts = sorted(range(n_expert), key=lambda x: expert_loads[x], reverse=True)
-        
-        # Assign expert replicas using EPLB principles
-        for expert in sorted_experts:
-            replicas_needed = expert_replicas[expert]
-            expert_load = expert_loads[expert]
-            
-            # Get precise load distribution for this expert's replicas
-            replica_loads = self._distribute_expert_load_precise(expert_load, replicas_needed)
-            
-            replica_index = 0
-            for _ in range(replicas_needed):
-                # Find devices that can still host more experts
-                available_devices = [i for i in range(n_device) if device_expert_count[i] < C_e]
-                
-                if available_devices:
-                    # Choose device with minimum load among available ones
-                    best_device = min(available_devices, key=lambda d: device_loads[d])
-                    A[expert, best_device] = 1
-                    device_loads[best_device] += replica_loads[replica_index]
-                    device_expert_count[best_device] += 1
-                    replica_index += 1
-                else:
-                    break  # No more capacity
-        
-        # Generate routing strategy
-        S = self._generate_smart_routing(n_device, n_expert, E, A)
-        total_time = self._calculate_total_time(n_device, n_expert, S, M_token)
-        
-        return A, S, total_time
-    
-    def _balanced_packing(self, weight: torch.Tensor, num_packs: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Pack n weighted objects to m packs with balanced weights"""
-        num_layers, num_groups = weight.shape
-        assert num_groups % num_packs == 0
-        groups_per_pack = num_groups // num_packs
 
-        if groups_per_pack == 1:
-            pack_index = torch.arange(weight.size(-1), dtype=torch.int64, device=weight.device).expand(weight.shape)
-            rank_in_pack = torch.zeros_like(weight, dtype=torch.int64)
-            return pack_index, rank_in_pack
-
-        indices = weight.float().sort(-1, descending=True).indices.cpu()
-        pack_index = torch.full_like(weight, fill_value=-1, dtype=torch.int64, device='cpu')
-        rank_in_pack = torch.full_like(pack_index, fill_value=-1)
-        
-        for i in range(num_layers):
-            pack_weights = [0] * num_packs
-            pack_items = [0] * num_packs
-            for group in indices[i]:
-                pack = min((j for j in range(num_packs) if pack_items[j] < groups_per_pack), 
-                          key=pack_weights.__getitem__)
-                assert pack_items[pack] < groups_per_pack
-                pack_index[i, group] = pack
-                rank_in_pack[i, group] = pack_items[pack]
-                pack_weights[pack] += weight[i, group]
-                pack_items[pack] += 1
-        return pack_index, rank_in_pack
-
-    def _replicate_experts(self, weight: torch.Tensor, num_phy: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Replicate logical experts to physical replicas"""
-        n, num_log = weight.shape
-        num_redundant = num_phy - num_log
-        assert num_redundant >= 0
-        
-        device = weight.device
-        phy2log = torch.arange(num_phy, dtype=torch.int64, device=device).repeat(n, 1)
-        rank = torch.zeros(n, num_phy, dtype=torch.int64, device=device)
-        logcnt = torch.ones(n, num_log, dtype=torch.int64, device=device)
-        arangen = torch.arange(n, dtype=torch.int64, device=device)
-        
-        for i in range(num_log, num_phy):
-            redundant_indices = (weight / logcnt).max(dim=-1).indices
-            phy2log[:, i] = redundant_indices
-            rank[:, i] = logcnt[arangen, redundant_indices]
-            logcnt[arangen, redundant_indices] += 1
-            
-        return phy2log, rank, logcnt
-
-    def _rebalance_experts_hierarchical(self, weight: torch.Tensor, num_physical_experts: int, 
-                          num_groups: int, num_nodes: int, num_gpus: int):
-        """Hierarchical expert rebalancing"""
-        num_layers, num_logical_experts = weight.shape
-        assert num_logical_experts % num_groups == 0
-        group_size = num_logical_experts // num_groups 
-        assert num_groups % num_nodes == 0
-        groups_per_node = num_groups // num_nodes
-        assert num_gpus % num_nodes == 0
-        assert num_physical_experts % num_gpus == 0
-        phy_experts_per_gpu = num_physical_experts // num_gpus
-
-        def inverse(perm: torch.Tensor) -> torch.Tensor:
-            inv = torch.empty_like(perm)
-            inv.scatter_(1, perm, torch.arange(perm.size(1), dtype=torch.int64, device=perm.device).expand(perm.shape))
-            return inv
-
-        # Step 1: pack groups to nodes
-        tokens_per_group = weight.unflatten(-1, (num_groups, group_size)).sum(-1)
-        group_pack_index, group_rank_in_pack = self._balanced_packing(tokens_per_group, num_nodes) 
-        log2mlog = (((group_pack_index * groups_per_node + group_rank_in_pack) * group_size).unsqueeze(-1) + 
-                    torch.arange(group_size, dtype=torch.int64, device=group_pack_index.device)).flatten(-2)
-        mlog2log = inverse(log2mlog)
-
-        # Step 2: construct redundant experts within nodes
-        tokens_per_mlog = weight.gather(-1, mlog2log).view(-1, num_logical_experts // num_nodes)
-        phy2mlog, phyrank, mlogcnt = self._replicate_experts(tokens_per_mlog, num_physical_experts // num_nodes)    
-
-        # Step 3: pack physical_experts to GPUs
-        tokens_per_phy = (tokens_per_mlog / mlogcnt).gather(-1, phy2mlog)
-        pack_index, rank_in_pack = self._balanced_packing(tokens_per_phy, num_gpus // num_nodes)
-        phy2pphy = pack_index * phy_experts_per_gpu + rank_in_pack
-        pphy2phy = inverse(phy2pphy)
-
-        pphy2mlog = phy2mlog.gather(-1, pphy2phy)
-        pphy2mlog = (pphy2mlog.view(num_layers, num_nodes, -1) + 
-                     torch.arange(0, num_logical_experts, num_logical_experts // num_nodes,
-                                  device=group_pack_index.device).view(1, -1, 1)).flatten(-2)
-        pphy2log = mlog2log.gather(-1, pphy2mlog)
-        pphyrank = phyrank.gather(-1, pphy2phy).view(num_layers, -1)
-        logcnt = mlogcnt.view(num_layers, -1).gather(-1, log2mlog)
-        
-        return pphy2log, pphyrank, logcnt
-
-    def _rebalance_experts(self, weight: torch.Tensor, num_replicas: int, num_groups: int,
-                          num_nodes: int, num_gpus: int) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Main EPLB entry point"""
-        num_layers, num_logical_experts = weight.shape
-        weight = weight.float().cpu()
-        
-        if num_groups % num_nodes == 0:
-            # Use hierarchical load-balance policy
-            phy2log, phyrank, logcnt = self._rebalance_experts_hierarchical(
-                weight, num_replicas, num_groups, num_nodes, num_gpus
-            )
-        else:
-            # Use global load-balance policy
-            phy2log, phyrank, logcnt = self._rebalance_experts_hierarchical(
-                weight, num_replicas, 1, 1, num_gpus
-            )
-            
-        maxlogcnt = logcnt.max().item()
-        log2phy = torch.full((num_layers, num_logical_experts, maxlogcnt), 
-                            -1, dtype=torch.int64, device=logcnt.device)
-        log2phy.view(num_layers, -1).scatter_(-1, phy2log * maxlogcnt + phyrank, 
-                torch.arange(num_replicas, dtype=torch.int64, device=log2phy.device).expand(num_layers, -1))
-        
-        return phy2log, log2phy, logcnt
-    
     def _generate_smart_routing(self, n_device: int, n_expert: int, E: List[List[int]], 
                                A: np.ndarray) -> np.ndarray:
         """Backward compatibility wrapper for the old routing function"""
@@ -677,7 +400,6 @@ class MoEOptimizer:
         
         # If we have remaining capacity, assign to experts with largest remainders
         while current_total < total_capacity:
-            remaining = total_capacity - current_total
             # Sort by remainder (descending) to assign to largest remainders first
             sorted_indices = sorted(range(n_expert), key=lambda x: remainders[x], reverse=True)
             for i in range(n_expert):
@@ -692,6 +414,42 @@ class MoEOptimizer:
         assert all(r >= 1 for r in integer_parts), "All experts must have at least 1 replica"
         
         return integer_parts
+    
+    def new_allocate_expert_replicas_precise(self, expert_loads: List[float], device_num: int, capacity: int) -> List[int]:
+        total_capacity = device_num * capacity
+        expert_num = len(expert_loads)
+        node_num = device_num // 8
+        class HeapItem:
+            def __init__(self, item) -> None:
+                self.item = item
+            def __lt__(self, other):
+                return self.item[0] / self.item[1] > other.item[0] / other.item[1]
+        max_heap = []
+        if node_num * expert_num < total_capacity: # each node has at least one expert
+            for i in range(expert_num):
+                heapq.heappush(max_heap, HeapItem((expert_loads[i], node_num, i)))
+            now_capacity = node_num * expert_num
+        else:
+            for i in range(expert_num):
+                heapq.heappush(max_heap, HeapItem((expert_loads[i], 1, i)))
+            now_capacity = expert_num
+
+        result = [0] * expert_num
+        while now_capacity < total_capacity:
+            item = heapq.heappop(max_heap)
+            if item.item[1] >= node_num:
+                if now_capacity + node_num <= total_capacity:
+                    heapq.heappush(max_heap, HeapItem((item.item[0], item.item[1] + node_num, item.item[2])))
+                    now_capacity += node_num
+                else:
+                    result[item.item[2]] = item.item[1]
+            else:
+                heapq.heappush(max_heap, HeapItem((item.item[0], item.item[1] + 1, item.item[2])))
+                now_capacity += 1
+
+        for item in max_heap:
+            result[item.item[2]] = item.item[1]
+        return result
 
     def _distribute_expert_load_precise(self, expert_load: int, replicas_needed: int) -> List[int]:
         """
@@ -714,148 +472,9 @@ class MoEOptimizer:
         
         return loads
 
-    def analyze_communication_breakdown(self, n_device: int, n_expert: int, S: np.ndarray, 
-                                        M_token: float, node_func: Callable[[int], int]) -> dict:
-        """Analyze communication breakdown by type: device-local, intra-node, inter-node"""
-        
-        comm_stats = {
-            'device_local': {'tokens': 0, 'time': 0.0, 'count': 0},
-            'intra_node': {'tokens': 0, 'time': 0.0, 'count': 0}, 
-            'inter_node': {'tokens': 0, 'time': 0.0, 'count': 0}
-        }
-        
-        for i in range(n_device):
-            for j in range(n_expert):
-                for k in range(n_device):
-                    if S[i, j, k] > 0:
-                        tokens = S[i, j, k]
-                        bandwidth = self.bandwidth_function(i, k, node_func)
-                        comm_time = M_token * tokens / bandwidth * 1e-9
-                        
-                        # Classify communication type
-                        if i == k:
-                            # Same device (local)
-                            comm_stats['device_local']['tokens'] += tokens
-                            comm_stats['device_local']['time'] += comm_time
-                            comm_stats['device_local']['count'] += 1
-                        elif node_func(i) == node_func(k):
-                            # Same node, different device (intra-node)
-                            comm_stats['intra_node']['tokens'] += tokens
-                            comm_stats['intra_node']['time'] += comm_time
-                            comm_stats['intra_node']['count'] += 1
-                        else:
-                            # Different node (inter-node)
-                            comm_stats['inter_node']['tokens'] += tokens
-                            comm_stats['inter_node']['time'] += comm_time
-                            comm_stats['inter_node']['count'] += 1
-        
-        # Calculate statistics
-        total_tokens = sum(stat['tokens'] for stat in comm_stats.values())
-        total_time = sum(stat['time'] for stat in comm_stats.values())
-        
-        for comm_type, stats in comm_stats.items():
-            if total_tokens > 0:
-                stats['token_ratio'] = stats['tokens'] / total_tokens
-            else:
-                stats['token_ratio'] = 0.0
-            
-            if total_time > 0:
-                stats['time_ratio'] = stats['time'] / total_time
-            else:
-                stats['time_ratio'] = 0.0
-        
-        return comm_stats
-
-    def analyze_per_device_communication(self, n_device: int, n_expert: int, S: np.ndarray, 
-                                       M_token: float, node_func: Callable[[int], int]) -> dict:
-        """Analyze detailed per-device communication breakdown"""
-        
-        device_stats = {}
-        
-        for device_id in range(n_device):
-            stats = {
-                'device_local': {'tokens': 0, 'time': 0.0},
-                'intra_node': {'tokens': 0, 'time': 0.0}, 
-                'inter_node': {'tokens': 0, 'time': 0.0},
-                'total_send': {'tokens': 0, 'time': 0.0},
-                'total_recv': {'tokens': 0, 'time': 0.0},
-                'computation_load': 0
-            }
-            
-            # Analyze outgoing communication (device_id as source)
-            for j in range(n_expert):
-                for k in range(n_device):
-                    if S[device_id, j, k] > 0:
-                        tokens = S[device_id, j, k]
-                        bandwidth = self.bandwidth_function(device_id, k, node_func)
-                        comm_time = M_token * tokens / bandwidth * 1e-9
-                        
-                        # Add to total send
-                        stats['total_send']['tokens'] += tokens
-                        stats['total_send']['time'] += comm_time
-                        
-                        # Classify by communication type
-                        if device_id == k:
-                            stats['device_local']['tokens'] += tokens
-                            stats['device_local']['time'] += comm_time
-                        elif node_func(device_id) == node_func(k):
-                            stats['intra_node']['tokens'] += tokens
-                            stats['intra_node']['time'] += comm_time
-                        else:
-                            stats['inter_node']['tokens'] += tokens
-                            stats['inter_node']['time'] += comm_time
-            
-            # Analyze incoming communication (device_id as target) for computation load
-            for i in range(n_device):
-                for j in range(n_expert):
-                    if S[i, j, device_id] > 0:
-                        tokens = S[i, j, device_id]
-                        stats['total_recv']['tokens'] += tokens
-                        stats['computation_load'] += tokens
-            
-            device_stats[device_id] = stats
-        
-        return device_stats
-
-    def calculate_load_balance_metrics(self, device_stats: dict) -> dict:
-        """Calculate load balance metrics"""
-        n_device = len(device_stats)
-        
-        # Extract computation loads
-        comp_loads = [device_stats[i]['computation_load'] for i in range(n_device)]
-        send_loads = [device_stats[i]['total_send']['tokens'] for i in range(n_device)]
-        recv_loads = [device_stats[i]['total_recv']['tokens'] for i in range(n_device)]
-        
-        def calculate_balance_stats(loads):
-            if not loads:
-                return {'mean': 0, 'std': 0, 'cv': 0, 'max_min_ratio': 0}
-            
-            mean_load = np.mean(loads)
-            std_load = np.std(loads)
-            cv = std_load / mean_load if mean_load > 0 else 0
-            max_load = max(loads)
-            min_load = min(loads)
-            max_min_ratio = max_load / min_load if min_load > 0 else float('inf')
-            
-            return {
-                'mean': mean_load,
-                'std': std_load,
-                'cv': cv,
-                'max_min_ratio': max_min_ratio,
-                'max': max_load,
-                'min': min_load
-            }
-        
-        return {
-            'computation': calculate_balance_stats(comp_loads),
-            'send': calculate_balance_stats(send_loads),
-            'recv': calculate_balance_stats(recv_loads)
-        }
-
     def _generate_smart_routing_with_capacities(self, n_device: int, n_expert: int, E: List[List[int]], 
-                                               A: np.ndarray, expert_replica_capacities: dict, 
-                                               node_func: Callable[[int], int]) -> np.ndarray:
-        """Generate robust routing strategy using pre-allocated replica capacities"""
+                                               A: np.ndarray, expert_replica_capacities: dict) -> np.ndarray:
+        """Generate robust routing strategy using pre-allocated replica capacities with smart routing logic"""
         S = np.zeros((n_device, n_expert, n_device))
         
         # Track current loads for each expert replica
@@ -866,81 +485,138 @@ class MoEOptimizer:
                 if A[expert, device] == 1:
                     expert_current_loads[expert][device] = 0
         
-        # Route tokens for each device and expert
-        for i in range(n_device):
-            for j in range(n_expert):
-                if E[i][j] == 0:
-                    continue
+        # Build expert location mappings (similar to get_smart_routing_map logic)
+        expert_to_locations = {}  # expert_id -> [(device, replica_idx), ...]
+        expert_to_nodes = {}      # expert_id -> [node_id, ...]
+        node_to_experts = {}      # node_id -> set(expert_ids)
+        
+        gpus_per_node = 8  # Assuming 8 GPUs per node, can be made configurable
+        
+        def get_node_id(device):
+            return device // gpus_per_node
+        
+        # Build expert location mappings
+        for device in range(n_device):
+            node_id = get_node_id(device)
+            if node_id not in node_to_experts:
+                node_to_experts[node_id] = set()
                 
-                # Get available target devices for this expert
-                target_devices = [k for k in range(n_device) if A[j, k] == 1]
-                if not target_devices:
-                    continue
-                
-                # Robust routing: distribute tokens across multiple replicas if needed
-                remaining_tokens = E[i][j]
-                
-                # Sort target devices by preference (local first, then by communication cost and capacity)
-                sorted_targets = self._sort_replicas_by_preference(
-                    i, j, target_devices, expert_replica_capacities, expert_current_loads, node_func
-                )
-                
-                for target_device in sorted_targets:
-                    if remaining_tokens <= 0:
-                        break
+            for expert in range(n_expert):
+                if A[expert, device] == 1:  # Expert is replicated on this device
+                    if expert not in expert_to_locations:
+                        expert_to_locations[expert] = []
+                        expert_to_nodes[expert] = set()
                     
-                    # Calculate how many tokens this replica can accept
-                    planned_capacity = expert_replica_capacities[j].get(target_device, 0)  # No capacity if not assigned
-                    current_load = expert_current_loads[j][target_device]
-                    available_capacity = max(0, planned_capacity - current_load)
-                    
-                    # Route as many tokens as possible to this replica
-                    tokens_to_route = min(remaining_tokens, available_capacity)
-                    
-                    if tokens_to_route > 0:
-                        S[i, j, target_device] += tokens_to_route
-                        expert_current_loads[j][target_device] += tokens_to_route
-                        remaining_tokens -= tokens_to_route
+                    expert_to_locations[expert].append((device, 0))  # replica_idx is 0 for single replica
+                    expert_to_nodes[expert].add(node_id)
+                    node_to_experts[node_id].add(expert)
+        
+        # Two-phase routing strategy (similar to get_smart_routing_map)
+        for mode in range(2):
+            for src_device in range(n_device):
+                src_node = get_node_id(src_device)
                 
-                # Handle any remaining tokens (fallback mechanism)
-                if remaining_tokens > 0:
-                    # If strict capacity constraints prevent routing, 
-                    # route to the best available replica anyway (with overload)
-                    best_target = sorted_targets[0]  # Best available target
-                    S[i, j, best_target] += remaining_tokens
-                    expert_current_loads[j][best_target] += remaining_tokens
+                for expert in range(n_expert):
+                    if E[src_device][expert] == 0:
+                        continue
                     
-                    # Log warning about capacity violation
-                    # print(f"Warning: Expert {j} replica on device {best_target} overloaded by {remaining_tokens} tokens")
+                    if expert not in expert_to_locations:
+                        continue
+                    
+                    all_locations = expert_to_locations[expert]
+                    intra_node_locations = [(device, replica_idx) for device, replica_idx in all_locations 
+                                          if get_node_id(device) == src_node]
+                    
+                    remaining_tokens = E[src_device][expert]
+                    
+                    if mode == 0:  # Phase 1: Intra-node routing (evenly distribute)
+                        if intra_node_locations:
+                            self._distribute_tokens_evenly_intra_node(
+                                S, src_device, expert, intra_node_locations, 
+                                remaining_tokens, expert_current_loads, expert_replica_capacities
+                            )
+                    else:  # Phase 2: Inter-node routing (evenly)
+                        if not intra_node_locations:
+                            self._distribute_tokens_evenly(
+                                S, src_device, expert, all_locations, 
+                                remaining_tokens, expert_current_loads, expert_replica_capacities
+                            )
         
         return S
     
-    def _sort_replicas_by_preference(self, source_device: int, expert: int, target_devices: List[int],
-                                   expert_replica_capacities: dict, expert_current_loads: dict) -> List[int]:
-        """Sort replica devices by routing preference (local first, then by cost and capacity)"""
-        
-        def replica_preference_score(device):
-            # Communication cost using bandwidth_function (primary factor)
-            bandwidth = self.bandwidth_function(source_device, device)
-            comm_cost = 1.0 / bandwidth if bandwidth > 0 else float('inf')
+    def _distribute_tokens_evenly(self, S, src_device, expert, locations, total_tokens, 
+                                 expert_current_loads, expert_replica_capacities):
+        """Generic even token allocation for both intra-node and inter-node"""
+        if not locations:
+            return
             
-            # Capacity availability (secondary factor)
-            planned_capacity = expert_replica_capacities[expert].get(device, 0)  # No capacity if not assigned
+        num_locations = len(locations)
+        tokens_per_location = total_tokens // num_locations
+        remaining_tokens = total_tokens % num_locations
+        
+        # Sort locations by available capacity (prefer less loaded replicas)
+        location_capacities = []
+        for device, replica_idx in locations:
+            planned_capacity = expert_replica_capacities[expert].get(device, 0)
             current_load = expert_current_loads[expert].get(device, 0)
             available_capacity = max(0, planned_capacity - current_load)
-            
-            # Start with communication cost as primary score
-            score = comm_cost
-            
-            # Penalize replicas with no available capacity
-            if available_capacity <= 0:
-                score += 1000.0  # Heavy penalty for full replicas
-            else:
-                # Small preference for replicas with more available capacity
-                # TODO: Small or Large?
-                capacity_bonus = 1.0 / (available_capacity + 1.0)
-                score += 0.01 * capacity_bonus  # Much smaller weight than communication cost
-            
-            return score
+            location_capacities.append((available_capacity, device, replica_idx))
         
-        return sorted(target_devices, key=replica_preference_score)
+        location_capacities.sort(reverse=True)  # Sort by available capacity (descending)
+        
+        for i, (available_capacity, target_device, replica_idx) in enumerate(location_capacities):
+            if total_tokens <= 0:
+                break
+                
+            tokens_to_assign = tokens_per_location
+            if i < remaining_tokens:
+                tokens_to_assign += 1
+            
+            # Respect capacity constraints
+            tokens_to_assign = min(tokens_to_assign, available_capacity, total_tokens)
+            
+            if tokens_to_assign > 0:
+                S[src_device, expert, target_device] += tokens_to_assign
+                expert_current_loads[expert][target_device] += tokens_to_assign
+                total_tokens -= tokens_to_assign
+    
+    def _distribute_tokens_evenly_intra_node(self, S, src_device, expert, locations, total_tokens, 
+                                           expert_current_loads, expert_replica_capacities):
+        """Intra-node token average allocation (wrapper for _distribute_tokens_evenly)"""
+        self._distribute_tokens_evenly(S, src_device, expert, locations, total_tokens, 
+                                     expert_current_loads, expert_replica_capacities)
+    
+    def _distribute_tokens_greedy_inter_node(self, S, src_device, expert, locations, total_tokens,
+                                           expert_current_loads, expert_replica_capacities):
+        """Inter-node token greedy allocation (similar to _distribute_tokens_greedy)"""
+        if not locations:
+            return
+            
+        # Sort locations by load and communication cost
+        loads_and_devices = []
+        for device, replica_idx in locations:
+            current_load = expert_current_loads[expert].get(device, 0)
+            planned_capacity = expert_replica_capacities[expert].get(device, 0)
+            available_capacity = max(0, planned_capacity - current_load)
+            
+            # Communication cost factor
+            bandwidth = self.bandwidth_function(src_device, device)
+            comm_cost = 1.0 / bandwidth if bandwidth > 0 else float('inf')
+            
+            # Combined score (load + communication cost)
+            score = current_load + 0.1 * comm_cost  # Small weight for comm cost
+            loads_and_devices.append((score, device, replica_idx, available_capacity))
+        
+        loads_and_devices.sort(key=lambda x: x[0])  # Sort by load (ascending)
+        
+        # Greedy allocation: fill least loaded replicas first
+        for score, target_device, replica_idx, available_capacity in loads_and_devices:
+            if total_tokens <= 0:
+                break
+                
+            tokens_to_assign = min(total_tokens, available_capacity)
+            
+            if tokens_to_assign > 0:
+                S[src_device, expert, target_device] += tokens_to_assign
+                expert_current_loads[expert][target_device] += tokens_to_assign
+                total_tokens -= tokens_to_assign

@@ -1,4 +1,5 @@
 import torch
+import os
 from flash_attn.ops.rms_norm import RMSNorm
 from megatron.core import mpu
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
@@ -107,7 +108,7 @@ class MoERouter(nn.Module):
     
 # TODO: Add shared expert support
 class MoEMLP_tp(nn.Module):
-    def __init__(self, config, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None, test_mode=False):
+    def __init__(self, config, token_dispatcher, layer_number, tp_group=None, ep_group=None, tp_of_ep_group=None, tp_and_ep_group=None, test_mode=False):
         super().__init__()
         if test_mode:
             megatron_config = core_transformer_config_from_args(get_args())
@@ -159,27 +160,14 @@ class MoEMLP_tp(nn.Module):
             #     self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
             #     layer_number = self.idx
             # )
-            self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
-                self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, self.global_expert_locations, self.inverse_expert_map, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
-                layer_number = self.idx
-            )
+            self.forward_event = torch.cuda.Event()
+            self.backward_event = torch.cuda.Event()
+            self.token_dispatcher = token_dispatcher
+            self.token_dispatcher.forward_event = self.forward_event
+            self.token_dispatcher.backward_event = self.backward_event
         else:
             self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
-            if self.config.moe_token_dispatcher_type == "allgather":
-                self.token_dispatcher = MoEAllGatherTokenDispatcher(
-                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
-                )
-            elif self.config.moe_token_dispatcher_type == "alltoall":
-                self.token_dispatcher = MoEAlltoAllTokenDispatcher(
-                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
-                    layer_number = self.idx
-                )
-            elif self.config.moe_token_dispatcher_type == "alltoall_seq":
-                assert False, "alltoall_seq is deprecated"
-            elif self.config.moe_token_dispatcher_type == "flex":
-                self.token_dispatcher = MoEFlexTokenDispatcher(
-                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
-                )
+            self.token_dispatcher = token_dispatcher
         
         if args.moe_grouped_gemm:
             assert self.use_fsep is False, "Grouped gemm does not support fsep."
@@ -219,23 +207,16 @@ class MoEMLP_tp(nn.Module):
                     self.tp_and_ep_group,
                 )
 
-    def forward(self, hidden_states, mlp_residual, probs, routing_map):
-        if probs is not None and routing_map is not None:
-            (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
-                    hidden_states, probs, routing_map
-                )
+    def forward(self, hidden_states, tokens_per_expert):
+        if tokens_per_expert is not None:
             if self.use_fsep:
-                expert_output, mlp_bias = self.real_experts(dispatched_input, tokens_per_expert)
+                expert_output, mlp_bias = self.real_experts(hidden_states, tokens_per_expert)
             else:
-                expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert)
-            hidden_states, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
-            hidden_states = hidden_states + mlp_residual
+                expert_output, mlp_bias = self.experts(hidden_states, tokens_per_expert)
         else:
             # Only for test
-            input_tensor = hidden_states
-            hidden_states, bias = self.mlp(hidden_states)
-            hidden_states = hidden_states + input_tensor
-        return hidden_states
+            expert_output, mlp_bias = self.mlp(hidden_states)
+        return expert_output, mlp_bias
 
 
 class MoELayer_tp(nn.Module):
@@ -243,11 +224,77 @@ class MoELayer_tp(nn.Module):
         super().__init__()
         self.attention = MoEAttention_tp(config, layer_number, tp_group, sp_group)
         self.router = MoERouter(layer_number)
-        self.mlp = MoEMLP_tp(config, layer_number, tp_group, ep_group, tp_of_ep_group, tp_and_ep_group)
+
+        args = get_args()
+        self.use_fsep = args.use_fsep
+        self.is_moe_layer = self.use_fsep
         self.idx = layer_number
-        rank = torch.distributed.get_rank(ep_group.group)
-        world_size = torch.distributed.get_world_size(ep_group.group)
-        moe_all_to_all_kernels.init_nccl_comm(ep_group.group, rank, world_size)
+        megatron_config = core_transformer_config_from_args(args)
+        self.config = megatron_config
+        self.tp_group = tp_group.group if tp_group is not None else None
+        self.ep_group = ep_group.group if ep_group is not None else None
+        self.tp_of_ep_group = tp_of_ep_group.group if tp_of_ep_group is not None else None
+        self.tp_and_ep_group = tp_and_ep_group.group if tp_and_ep_group is not None else None
+
+        self.expert_parallel_size = mpu.get_expert_model_parallel_world_size(self.ep_group)
+        assert self.expert_parallel_size > 0, "Expected non-negative expert parallel size"
+
+        # assert self.config.num_moe_experts % self.expert_parallel_size == 0
+        self.num_global_experts = self.config.num_moe_experts
+        self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
+        self.expert_capacity_per_device = args.expert_capacity_per_device
+        expert_capacity_offset = (
+            mpu.get_expert_model_parallel_rank(self.ep_group) * self.expert_capacity_per_device
+        )
+        self.expert_capacity_indices = [
+            expert_capacity_offset + i for i in range(self.expert_capacity_per_device)
+        ]
+        local_expert_indices_offset = (
+            mpu.get_expert_model_parallel_rank(self.ep_group) * self.num_local_experts
+        )
+        self.local_expert_indices = [
+            local_expert_indices_offset + i for i in range(self.num_local_experts)
+        ]
+        if self.use_fsep:
+            # TODO: Update solver to modify global_expert_indices
+            self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
+            self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
+            self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device), -1, dtype=torch.int32, device=torch.cuda.current_device())
+            for i in range(self.num_global_experts):
+                self.global_expert_locations[i, :(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts)] = torch.arange(i, self.expert_parallel_size * self.expert_capacity_per_device, self.num_global_experts, dtype=torch.int32)
+            self.inverse_expert_map = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
+            self.inverse_expert_map = self.inverse_expert_map.reshape(-1,1).repeat(1, self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).contiguous()
+            # self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+            #     self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+            #     layer_number = self.idx
+            # )
+            self.token_dispatcher = MoEAlltoAllSmartTokenDispatcher(
+                self.expert_capacity_per_device, self.expert_capacity_indices, self.global_expert_indices, self.global_expert_locations, self.inverse_expert_map, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+                layer_number = self.idx
+            )
+        else:
+            self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
+            if self.config.moe_token_dispatcher_type == "allgather":
+                self.token_dispatcher = MoEAllGatherTokenDispatcher(
+                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
+                )
+            elif self.config.moe_token_dispatcher_type == "alltoall":
+                self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group,
+                    layer_number = self.idx
+                )
+            elif self.config.moe_token_dispatcher_type == "alltoall_seq":
+                assert False, "alltoall_seq is deprecated"
+            elif self.config.moe_token_dispatcher_type == "flex":
+                self.token_dispatcher = MoEFlexTokenDispatcher(
+                    self.num_local_experts, self.local_expert_indices, config=self.config, ep_group=self.ep_group, tp_of_ep_group=self.tp_of_ep_group, tp_and_ep_group=self.tp_and_ep_group
+                )
+        self.mlp = MoEMLP_tp(config, self.token_dispatcher, layer_number, tp_group, ep_group, tp_of_ep_group, tp_and_ep_group)
+
+        # if os.getenv("ENABLE_HIERARCHICAL", "0") == "0":
+        #     rank = torch.distributed.get_rank(ep_group.group)
+        #     world_size = torch.distributed.get_world_size(ep_group.group)
+        #     moe_all_to_all_kernels.init_nccl_comm(ep_group.group, rank, world_size)
 
     def forward(
         self,
@@ -261,7 +308,12 @@ class MoELayer_tp(nn.Module):
             rotary_embedding,
         )
         probs, routing_map = self.router(attention_output)
-        layer_output = self.mlp(attention_output, mlp_residual, probs, routing_map)
+        (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
+                attention_output, probs, routing_map
+            )
+        expert_output, mlp_bias = self.mlp(dispatched_input, tokens_per_expert)
+        mlp_output, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        layer_output = mlp_output + mlp_residual
         return layer_output
 
 class MoELayer_attention(nn.Module):
@@ -295,7 +347,7 @@ class MoELayer_mlp(nn.Module):
         attention_mask=None,
         rotary_embedding=None,
     ):
-        layer_output = self.mlp(hidden_states, None, None, None)
+        layer_output = self.mlp(hidden_states, None)
         return layer_output
 
 
@@ -340,6 +392,8 @@ def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc,
         for i in range(len(layers_tp)-1):
             layers_tp[i].router.predict = layers_tp[i+1].router.router.predict
             layers_tp[i].mlp.token_dispatcher.nxt_dispatcher = layers_tp[i+1].mlp.token_dispatcher
+        for i in range(1,len(layers_tp)):
+            layers_tp[i].mlp.token_dispatcher.pre_dispatcher = layers_tp[i-1].mlp.token_dispatcher
         # layers_tp[len(layers_tp)-1].mlp.token_dispatcher.nxt_dispatcher = layers_tp[0].mlp.token_dispatcher
 
     setattr(model.model, "layers", layers_tp)

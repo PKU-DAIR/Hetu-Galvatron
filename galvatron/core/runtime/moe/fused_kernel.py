@@ -1631,3 +1631,174 @@ def cuda_optimized_all_to_all_expert_grads(
     )
     
     return padded_unsharded_grad, new_sharded_grad
+
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_SIZE": 64}),
+        triton.Config({"BLOCK_SIZE": 128}),
+        triton.Config({"BLOCK_SIZE": 256}),
+        triton.Config({"BLOCK_SIZE": 512}),
+        triton.Config({"BLOCK_SIZE": 1024}),
+    ],
+    key=["expert_shard_size"],
+)
+@triton.jit
+def _hierarchical_process_grad_all_to_all_recv_kernel(
+    # Input tensors
+    recv_buffer_ptr,
+    global_placement_ptr,
+    # Output tensors
+    new_sharded_grad_ptr,
+    # Configuration
+    gpus_per_node,
+    world_size,
+    global_expert_num,
+    local_expert_num,
+    expert_shard_size,
+    # Stride information
+    stride_recv_node,
+    stride_recv_rank,
+    stride_recv_expert,
+    stride_recv_shard,
+    stride_output_node,
+    stride_output_expert,
+    stride_output_shard,
+    # Meta parameters
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Process gradient all_to_all received data and accumulate using index_add"""
+    node_idx = tl.program_id(0)
+    expert_global_idx = tl.program_id(1)
+    block_idx = tl.program_id(2)
+    block_base_offset = block_idx * DATA_BLOCK_SIZE
+    # Process entire shard in blocks
+    shard_offset = 0
+    while shard_offset < DATA_BLOCK_SIZE:
+        # Calculate current block range
+        block_offset = block_base_offset + shard_offset + tl.arange(0, BLOCK_SIZE)
+        mask = block_offset < expert_shard_size
+        
+        # Initialize accumulator for this block
+        accumulator = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
+        
+        # Loop through all ranks to accumulate gradients
+        for rank in range(gpus_per_node):
+            # Check if current expert is in this rank's placement and accumulate
+            rank_start = rank * local_expert_num
+            for local_idx in range(local_expert_num):
+                placement_idx = rank_start + local_idx
+                if placement_idx < world_size * local_expert_num:
+                    needed_expert = tl.load(global_placement_ptr + placement_idx)
+                    
+                    if needed_expert == expert_global_idx:
+                        # Read gradient from receive buffer
+                        src_offset = (node_idx * stride_recv_node +
+                                     rank * stride_recv_rank + 
+                                     local_idx * stride_recv_expert +
+                                     block_offset * stride_recv_shard)
+                        grad_data = tl.load(recv_buffer_ptr + src_offset, mask=mask)
+                        accumulator += grad_data.to(tl.float32)
+        
+        # Store final accumulated result
+        dst_offset = node_idx * stride_output_node + expert_global_idx * stride_output_expert + block_offset * stride_output_shard
+        result = accumulator.to(new_sharded_grad_ptr.dtype.element_ty)
+        tl.store(new_sharded_grad_ptr + dst_offset, result, mask=mask)
+        
+        # Move to next block
+        shard_offset += BLOCK_SIZE
+
+def hierarchical_all_to_all_expert_weights(
+    padded_unsharded_flat_param: torch.Tensor,
+    sharded_flat_param: torch.Tensor,
+    global_placement: torch.Tensor,
+    world_size: int,
+    local_expert_num: int,
+    global_expert_num: int,
+    inter_process_group,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    expert_shard_size = sharded_flat_param.numel() // global_expert_num
+    device = sharded_flat_param.device
+    dtype = sharded_flat_param.dtype
+
+    gpus_per_node = 8
+    node_rank = torch.distributed.get_rank(inter_process_group)
+    inter_buffer = get_global_memory_buffer().get_tensor([world_size // gpus_per_node * global_expert_num * expert_shard_size], sharded_flat_param.dtype, "p2p_forward")
+    # inter_buffer = inter_buffer.view(world_size // gpus_per_node, -1)
+    torch.distributed.all_gather_into_tensor(
+        inter_buffer, sharded_flat_param, group=inter_process_group
+    )
+    # [global_expert_num, expert_shard_size] -> [node_num, global_expert_num, expert_shard_size]
+
+    moe_all_to_all_kernels.hierarchical_moe_nccl_forward(
+        inter_buffer,
+        global_placement[node_rank * gpus_per_node:(node_rank + 1) * gpus_per_node],
+        padded_unsharded_flat_param,
+        world_size,
+        global_expert_num,
+        local_expert_num,
+        expert_shard_size,
+    )
+    
+    return padded_unsharded_flat_param, sharded_flat_param
+
+def hierarchical_all_to_all_expert_grads(
+    padded_unsharded_grad: torch.Tensor,
+    new_sharded_grad: torch.Tensor,
+    global_placement_cpu: torch.Tensor,
+    global_placement: torch.Tensor,
+    world_size: int,
+    global_expert_num: int,
+    local_expert_num: int,
+    inter_process_group,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    
+    device = padded_unsharded_grad.device
+    dtype = padded_unsharded_grad.dtype
+    expert_shard_size = padded_unsharded_grad.numel() // (local_expert_num * world_size)
+
+    gpus_per_node = 8
+    node_num = world_size // gpus_per_node
+    node_rank = torch.distributed.get_rank(inter_process_group)
+    # [node_num, gpus_per_node, local_expert_num, expert_shard_size]
+    inter_buffer = get_global_memory_buffer().get_tensor([world_size * local_expert_num * expert_shard_size], padded_unsharded_grad.dtype, "p2p_backward")
+    
+    moe_all_to_all_kernels.hierarchical_moe_nccl_backward(
+        padded_unsharded_grad,
+        global_placement_cpu[node_rank * gpus_per_node:(node_rank + 1) * gpus_per_node],
+        inter_buffer,
+        world_size,
+        global_expert_num,
+        local_expert_num,
+        expert_shard_size,
+    )
+
+    # TODO: scalibility when fine grained?
+    # [node_num, global_expert_num, expert_shard_size]
+    add_buffer = get_global_memory_buffer().get_tensor([world_size // gpus_per_node * global_expert_num * expert_shard_size], padded_unsharded_grad.dtype, "p2p_backward_2")
+    add_buffer.zero_()
+    num_blocks = triton.cdiv(expert_shard_size, DATA_BLOCK_SIZE)
+    grid = (node_num, global_expert_num, num_blocks)
+    
+    _hierarchical_process_grad_all_to_all_recv_kernel[grid](
+        inter_buffer,
+        global_placement[node_rank * gpus_per_node:(node_rank + 1) * gpus_per_node],
+        add_buffer,
+        gpus_per_node,
+        world_size,
+        global_expert_num,
+        local_expert_num,
+        expert_shard_size,
+        # Stride information
+        gpus_per_node * local_expert_num * expert_shard_size,  # stride_recv_node
+        local_expert_num * expert_shard_size,  # stride_recv_rank
+        expert_shard_size,                     # stride_recv_expert
+        1,                                     # stride_recv_shard
+        global_expert_num * expert_shard_size, # stride_output_node
+        expert_shard_size,                     # stride_output_expert
+        1,                                     # stride_output_shard
+    )
+
+    torch.distributed.reduce_scatter_tensor(new_sharded_grad, add_buffer, group=inter_process_group)
+    
+    return padded_unsharded_grad, new_sharded_grad

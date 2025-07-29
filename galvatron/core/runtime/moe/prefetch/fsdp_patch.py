@@ -47,8 +47,12 @@ from galvatron.core.runtime.moe.fused_kernel import (
     triton_optimized_all_to_all_expert_weights,
     triton_optimized_all_to_all_expert_grads,
     cuda_optimized_all_to_all_expert_weights,
-    cuda_optimized_all_to_all_expert_grads
+    cuda_optimized_all_to_all_expert_grads,
+    hierarchical_all_to_all_expert_weights,
+    hierarchical_all_to_all_expert_grads,
 )
+
+import moe_all_to_all_kernels
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +64,35 @@ original_all_gather_flat_param = FlatParamHandle._all_gather_flat_param
 original_use_unsharded_views = FlatParamHandle._use_unsharded_views
 original_reduce_grad = _runtime_utils._reduce_grad
 original_prepare_gradient_for_backward = FlatParamHandle.prepare_gradient_for_backward
+
+ep_intra_node_group_dict = {}
+ep_inter_node_group_dict = {}
+prefetch_group_dict = {}
+
+def get_ep_group_intra_inter(rank, world_size, gpus_per_node):
+    nodes_num = world_size // gpus_per_node
+    for i in range(gpus_per_node):
+        ranks_in_group = []
+        for node_rank in range(nodes_num):
+            global_rank = node_rank * gpus_per_node + i
+            if global_rank < world_size:
+                ranks_in_group.append(global_rank)
+        group = dist.new_group(ranks=ranks_in_group)
+        in_group = rank in ranks_in_group
+        if in_group:
+            inter_group = group
+    
+    for node_rank in range(nodes_num):
+        ranks_in_group = []
+        for i in range(gpus_per_node):
+            global_rank = node_rank * gpus_per_node + i
+            if global_rank < world_size:
+                ranks_in_group.append(global_rank)
+        group = dist.new_group(ranks=ranks_in_group)
+        in_group = rank in ranks_in_group
+        if in_group:
+            intra_group = group
+    return intra_group, inter_group
 
 def _new_init(
     self,
@@ -100,6 +133,21 @@ def _new_init(
     self.device = device
     self._device_handle = _FSDPDeviceHandle.from_device(self.device)
     self.process_group = process_group
+
+    # FSEP ADD
+    if os.getenv("ENABLE_HIERARCHICAL", "0") == "1":
+        world_size = process_group.size()
+        rank = process_group.rank()
+        gpus_per_node = 8
+        if world_size not in ep_intra_node_group_dict:
+            ep_intra_node_group_dict[world_size], ep_inter_node_group_dict[world_size] = get_ep_group_intra_inter(rank, world_size, gpus_per_node)
+        moe_all_to_all_kernels.init_nccl_comm(ep_intra_node_group_dict[world_size], rank % gpus_per_node, gpus_per_node)
+    else:
+        world_size = process_group.size()
+        rank = process_group.rank()
+        if world_size not in prefetch_group_dict:
+            prefetch_group_dict[world_size] = dist.new_group(ranks=range(world_size))
+        moe_all_to_all_kernels.init_nccl_comm(prefetch_group_dict[world_size], rank, world_size)
     self.rank = process_group.rank()
     self.world_size = process_group.size()
     self._sharding_strategy = sharding_strategy
@@ -164,6 +212,9 @@ def new_init(self, *args, **kwargs):
         # [world_size * local_expert_num]
         self.global_placement = _fully_sharded_module.global_expert_indices
         self.global_placement_cpu = _fully_sharded_module.global_expert_indices.to("cpu")
+
+        self.forward_event = _fully_sharded_module.forward_event
+        self.backward_event = _fully_sharded_module.backward_event
     else:
         self.is_moe_layer = False
 
@@ -544,7 +595,8 @@ def _all_to_all_flat_param_type3_cuda(
     """CUDA-optimized expert weights all_to_all operation"""
     sharded_flat_param = sharded_flat_param.contiguous()
     # .reshape(self.global_expert_num, -1)
-    
+    # if torch.cuda.current_device() == 0:
+    #     print(f"forward: {self._fully_sharded_module.idx} {self.global_placement_cpu}")
     # Use Triton-optimized all_to_all
     padded_unsharded_flat_param, sharded_flat_param = cuda_optimized_all_to_all_expert_weights(
         padded_unsharded_flat_param,
@@ -557,6 +609,30 @@ def _all_to_all_flat_param_type3_cuda(
     )
     
     return padded_unsharded_flat_param, sharded_flat_param
+
+def _all_to_all_flat_param_type4_hierarchical(
+    self,
+    padded_unsharded_flat_param: Tensor,
+    sharded_flat_param: Tensor,
+    process_group,
+):
+    """CUDA-optimized expert weights all_to_all operation"""
+    sharded_flat_param = sharded_flat_param.contiguous()
+    # .reshape(self.global_expert_num, -1)
+    
+    # Use Triton-optimized all_to_all
+    padded_unsharded_flat_param, sharded_flat_param = hierarchical_all_to_all_expert_weights(
+        padded_unsharded_flat_param,
+        sharded_flat_param,
+        self.global_placement_cpu,
+        self.world_size,
+        self.local_expert_num,
+        self.global_expert_num,
+        ep_inter_node_group_dict[self.world_size],
+    )
+    
+    return padded_unsharded_flat_param, sharded_flat_param
+
 
 def _all_to_all_grad_type2_triton(
     handle: FlatParamHandle,
@@ -585,6 +661,8 @@ def _all_to_all_grad_type3_cuda(
     process_group,
 ):
     """CUDA-optimized expert gradient all_to_all operation"""
+    # if torch.cuda.current_device() == 0:
+    #     print(f"backward: {handle._fully_sharded_module.idx} {handle.global_placement_cpu}")
     padded_unsharded_grad, new_sharded_grad = cuda_optimized_all_to_all_expert_grads(
         padded_unsharded_grad,
         new_sharded_grad,
@@ -597,6 +675,27 @@ def _all_to_all_grad_type3_cuda(
     )
     
     return padded_unsharded_grad, new_sharded_grad
+
+def _all_to_all_grad_type4_hierarchical(
+    handle: FlatParamHandle,
+    padded_unsharded_grad: Tensor,
+    new_sharded_grad: Tensor,
+    process_group,
+):
+    """CUDA-optimized expert gradient all_to_all operation"""
+    padded_unsharded_grad, new_sharded_grad = hierarchical_all_to_all_expert_grads(
+        padded_unsharded_grad,
+        new_sharded_grad,
+        handle.global_placement_cpu,
+        handle.global_placement,
+        handle.world_size,
+        handle.global_expert_num,
+        handle.local_expert_num,
+        ep_inter_node_group_dict[handle.world_size],
+    )
+    
+    return padded_unsharded_grad, new_sharded_grad
+
 
 def new_all_gather_flat_param(
     self,
@@ -637,6 +736,10 @@ def new_all_gather_flat_param(
     else:
         # FSEP UPD: Flexiable all gather
         with torch.no_grad():
+            if self._training_state == HandleTrainingState.FORWARD:
+                torch.cuda.current_stream().wait_event(self.forward_event)
+            else:
+                torch.cuda.current_stream().wait_event(self.backward_event)
             padded_unsharded_flat_param, sharded_flat_param = self._all_to_all_flat_param(
                 padded_unsharded_flat_param,
                 sharded_flat_param,
@@ -786,7 +889,7 @@ FlatParamHandle._init_flat_param_and_metadata = new_init_flat_param_and_metadata
 FlatParamHandle.init_flat_param_attributes = new_init_flat_param_attributes
 FlatParamHandle.flatten_tensors_into_flat_param = new_flatten_tensors_into_flat_param
 FlatParamHandle._all_gather_flat_param = new_all_gather_flat_param
-FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type3_cuda
+
 FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backward
 # FlatParamHandle.set_lp_task_id = set_lp_task_id
 # FlatParamHandle._async_lp_prefetch_logic = _async_lp_prefetch_logic
@@ -796,4 +899,9 @@ FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backwar
 # FlatParamHandle._use_unsharded_views = new_use_unsharded_views
 
 _runtime_utils._reduce_grad = new_reduce_grad
-_all_to_all_grad = _all_to_all_grad_type3_cuda
+if os.getenv("ENABLE_HIERARCHICAL", "0") == "0":
+    FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type3_cuda
+    _all_to_all_grad = _all_to_all_grad_type3_cuda
+else:
+    FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type4_hierarchical
+    _all_to_all_grad = _all_to_all_grad_type4_hierarchical

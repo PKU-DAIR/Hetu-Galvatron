@@ -14,6 +14,7 @@ from .layers import (
 from .mappings import (
     all_gather_last_dim_from_tensor_parallel_region,
     all_to_all,
+    all_to_all_with_event,
     all_to_all_hp2sp,
     all_to_all_sp2hp,
     copy_to_tensor_model_parallel_region,

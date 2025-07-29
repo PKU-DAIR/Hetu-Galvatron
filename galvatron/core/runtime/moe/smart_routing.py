@@ -1,7 +1,9 @@
 from typing import List, Optional, Tuple
 
 import torch
+import os
 import torch.distributed as dist
+from torch.distributed.fsdp._runtime_utils import HandleTrainingState
 
 from galvatron.core.runtime.moe.token_dispatcher import MoETokenDispatcher
 from galvatron.core import get_args
@@ -19,6 +21,7 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.tensor_parallel import (
     all_to_all,
+    all_to_all_with_event,
     gather_from_sequence_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
 )
@@ -120,7 +123,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         
         # Async Linear Programming Solver configuration
         self.async_lp_solver_config = {
-            "enabled": True,
+            "enabled": os.environ.get("ENABLE_SOLVER", "0") == "1",
             "computation_config_path": getattr(args, 'moe_computation_config_path', './configs/computation_profiling_bf16_mixtral-8x7b.json'),
             "network_config_path": getattr(args, 'moe_network_config_path', './configs/network_config.json'),
             "expert_capacity_per_device": self.num_local_experts
@@ -491,6 +494,11 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             num_global_tokens_per_expert = smart_routing_map_gpu(num_global_tokens_per_expert, self.global_expert_locations, self.num_local_experts)
             # new_routing_map, new_probs = new_routing_map_vectorized_gpu(num_global_tokens_per_expert, self.global_expert_locations, routing_map, probs, self.tp_rank, self.ep_rank)
             new_routing_map, new_probs = new_routing_map_with_gradients(num_global_tokens_per_expert, self.global_expert_locations, self.inverse_expert_map, routing_map, probs, self.tp_rank, self.ep_rank)
+
+            # torch.set_printoptions(threshold=1000000)
+            # if torch.cuda.current_device() == 0:
+            #     print(f"before:{old_num_global_tokens_per_expert}, {self.global_expert_locations}, {self.num_local_experts}")
+            #     print(f"after:{num_global_tokens_per_expert}")
             
             # if torch.cuda.current_device() == 0:
             #     print(f"before {old_num_global_tokens_per_expert.reshape(-1,8).sum(dim=0)} after {num_global_tokens_per_expert.reshape(-1,8,2).sum(dim=(0,-1))} indices {self.global_expert_indices}")
@@ -571,7 +579,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 - Number of tokens per expert.
         """
         if (self.async_lp_solver_config["enabled"]):
-            if hasattr(self, "nxt_dispatcher"):
+            if hasattr(self, "nxt_dispatcher") and self.fsdp_handle._training_state == HandleTrainingState.FORWARD:
                 self.nxt_dispatcher._async_lp_prefetch_logic()
         
         # Preprocess: Get the metadata for communication, permutation and computation operations.
@@ -604,9 +612,15 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         tokens_per_expert = self._maybe_dtoh_and_synchronize(
             "before_ep_alltoall", tokens_per_expert
         )
-        global_input_tokens = all_to_all(
-            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
-        )
+        if hasattr(self, "nxt_dispatcher") and self.nxt_dispatcher is not None:
+            global_input_tokens = all_to_all_with_event(
+                self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits,
+                self.nxt_dispatcher.forward_event
+            )
+        else:
+            global_input_tokens = all_to_all(
+                self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+            )
         if self.shared_experts is not None:
             self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
 
@@ -706,9 +720,15 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
 
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
-        permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits
-        )
+        if hasattr(self, "pre_dispatcher") and self.pre_dispatcher is not None:
+            permutated_local_input_tokens = all_to_all_with_event(
+                self.ep_group, hidden_states, self.input_splits, self.output_splits,
+                None, self.pre_dispatcher.backward_event
+            )
+        else:
+            permutated_local_input_tokens = all_to_all(
+                self.ep_group, hidden_states, self.input_splits, self.output_splits
+            )
         if self.shared_experts is not None:
             self.shared_experts.linear_fc2_forward(permutated_local_input_tokens)
             self.shared_experts.post_forward_comm()
@@ -742,7 +762,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 expert_capacity_per_device=self.async_lp_solver_config["expert_capacity_per_device"]
             )
 
-            if hasattr(self, "nxt_dispatcher"):
+            if hasattr(self, "nxt_dispatcher") and self.fsdp_handle._training_state == HandleTrainingState.FORWARD:
                 self.nxt_dispatcher.sync_htod()
             # Pass task ID to FSDP layer for prefetch result retrieval
             # self._notify_fsdp_layer_task_id(self.async_lp_task_id, self.cuda_htod_stream)
