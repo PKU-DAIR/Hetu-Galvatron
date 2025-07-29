@@ -2,7 +2,7 @@ import logging
 import torch
 import os
 from torch import Tensor, nn
-from typing import List, Union, Dict, Union, Any, Tuple, cast, Optional, Sequence
+from typing import List, Union, Dict, Union, Any, Tuple, cast, Optional, Sequence, no_type_check
 import torch.distributed as dist
 from torch.distributed.utils import (
     _p_assert,
@@ -25,9 +25,12 @@ from torch.distributed.fsdp.flat_param import (
 )
 from torch.distributed.fsdp._common_utils import (
     HandleTrainingState,
+    TrainingState,
     _FSDPDeviceHandle,
     _FSDPState,
-    _no_dispatch_record_stream
+    _no_dispatch_record_stream,
+    _is_composable,
+    _assert_in_training_states
 )
 from torch.distributed.fsdp import _runtime_utils
 from torch.distributed.fsdp._runtime_utils import (
@@ -53,6 +56,7 @@ from galvatron.core.runtime.moe.fused_kernel import (
 )
 
 import moe_all_to_all_kernels
+from megatron.core.parallel_state import set_delayed_gradient, get_delayed_gradient
 
 log = logging.getLogger(__name__)
 
@@ -68,6 +72,7 @@ original_prepare_gradient_for_backward = FlatParamHandle.prepare_gradient_for_ba
 ep_intra_node_group_dict = {}
 ep_inter_node_group_dict = {}
 prefetch_group_dict = {}
+set_delayed_gradient()
 
 def get_ep_group_intra_inter(rank, world_size, gpus_per_node):
     nodes_num = world_size // gpus_per_node
@@ -215,6 +220,11 @@ def new_init(self, *args, **kwargs):
 
         self.forward_event = _fully_sharded_module.forward_event
         self.backward_event = _fully_sharded_module.backward_event
+        if hasattr(_fully_sharded_module.token_dispatcher, "pre_dispatcher"):
+            self.pre_backward_event = _fully_sharded_module.token_dispatcher.pre_dispatcher.backward_event
+        else:
+            self.pre_backward_event = None
+            
     else:
         self.is_moe_layer = False
 
@@ -740,6 +750,7 @@ def new_all_gather_flat_param(
                 torch.cuda.current_stream().wait_event(self.forward_event)
             else:
                 torch.cuda.current_stream().wait_event(self.backward_event)
+            # get_delayed_gradient().execute_pending_gradinet()
             padded_unsharded_flat_param, sharded_flat_param = self._all_to_all_flat_param(
                 padded_unsharded_flat_param,
                 sharded_flat_param,
@@ -905,3 +916,217 @@ if os.getenv("ENABLE_HIERARCHICAL", "0") == "0":
 else:
     FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type4_hierarchical
     _all_to_all_grad = _all_to_all_grad_type4_hierarchical
+
+from torch.distributed.fsdp._runtime_utils import _catch_all_reshard, _finalize_params
+
+@no_type_check
+@torch.no_grad()
+def new_post_backward_final_callback(
+    state: _FSDPState,
+    module: nn.Module,
+):
+    """
+    This waits for the post-backward to finish and performs some final cleanup.
+    This runs at the end of the entire backward pass and should only be called
+    on the root FSDP instance.
+    """
+    _p_assert(
+        state._is_root,
+        "The post-backward callback should only be called on the root FSDP instance",
+    )
+    root_state = state
+    get_delayed_gradient().execute_pending_gradinet()
+    if root_state._sync_gradients:
+        current_stream = state._device_handle.current_stream()
+        # TODO (rohan-varma): this also waits for the overlapped optimizer step to finish
+        # since it currently runs in the post-backward stream. That can be
+        # pushed to the next forward if run in a different stream
+        current_stream.wait_stream(root_state._post_backward_stream)
+        if root_state._all_reduce_stream is not current_stream:  # uses HSDP
+            current_stream.wait_stream(root_state._all_reduce_stream)
+        if root_state.cpu_offload.offload_params:
+            # Wait for non-blocking GPU -> CPU sharded gradient copies from the
+            # post-backward hooks to finish explicitly since CPU gradients do
+            # not automatically synchronize with the GPU
+            state._device_handle.current_stream().synchronize()
+    root_state._exec_order_data.next_iter()
+    for fsdp_state in state._all_fsdp_states:
+        _catch_all_reshard(fsdp_state)
+        _runtime_utils._finalize_params(fsdp_state)
+        fsdp_state.training_state = TrainingState.IDLE
+        handle = fsdp_state._handle
+        if handle:
+            handle._ran_pre_backward_hook = False
+            handle._needs_pre_backward_unshard = False
+            handle._post_forward_index = None
+            handle._training_state = HandleTrainingState.IDLE
+            handle._prefetched = False
+    # Reset for cases like one forward and multiple backwards
+    root_state._post_backward_callback_queued = False
+
+_runtime_utils._post_backward_final_callback = new_post_backward_final_callback
+
+def explicit_reduce_grad(state: _FSDPState, handle: FlatParamHandle, grad_dict: Dict) -> None:
+    if not handle.is_moe_layer:
+        original_reduce_grad(state, handle)
+    else:
+        # flat_param = handle.flat_param
+        uses_hybrid_sharded_strategy = handle._sharding_strategy in (
+            HandleShardingStrategy.HYBRID_SHARD,
+            HandleShardingStrategy._HYBRID_SHARD_ZERO2,
+        )
+        # We clear `.grad` to permit multiple backwards. This avoids a race where
+        # the second backward pass computation precedes ahead of the first backward
+        # pass reduction, which is possible since the reduction is issued in a
+        # separate stream and is async and would result in reducing the wrong
+        # gradient.
+        unsharded_grad = grad_dict[handle].data
+        grad_dict[handle] = None
+        # FSEP UPD: Get new tensor shape
+        padded_unsharded_grad, new_sharded_grad = _get_all_to_all_tensors(
+            handle, unsharded_grad
+        )
+        if state._comm_hook is None:  # default path
+            _div_if_needed(padded_unsharded_grad, state._gradient_predivide_factor)
+            # FSEP UPD: Update new all to all communication
+            # dist.reduce_scatter_tensor(
+            #     new_sharded_grad,
+            #     padded_unsharded_grad,
+            #     group=state.process_group,
+            # )
+            padded_unsharded_grad, new_sharded_grad = _all_to_all_grad(
+                handle,
+                padded_unsharded_grad,
+                new_sharded_grad,
+                state.process_group
+            )
+            if uses_hybrid_sharded_strategy:
+                state._all_reduce_stream.wait_stream(state._post_backward_stream)
+                with state._device_handle.stream(state._all_reduce_stream):
+                    # Since the new sharded gradient is produced in the post-
+                    # backward stream and consumed in the all-reduce stream,
+                    # inform the caching allocator
+                    _no_dispatch_record_stream(new_sharded_grad, state._all_reduce_stream)
+                    dist.all_reduce(new_sharded_grad, group=state._inter_node_pg)
+                    _div_if_needed(new_sharded_grad, state._gradient_postdivide_factor)
+                    grad_to_offload = _accumulate_sharded_grad(
+                        state, handle, new_sharded_grad
+                    )
+                    _post_reduce_grad_callback(state, handle, grad_to_offload)
+                    return
+            _div_if_needed(new_sharded_grad, state._gradient_postdivide_factor)
+        else:
+            state._comm_hook(
+                state._comm_hook_state, padded_unsharded_grad, new_sharded_grad
+            )
+            # NOTE: HSDP variants do not support communication hook.
+        grad_to_offload = _accumulate_sharded_grad(state, handle, new_sharded_grad)
+        _post_reduce_grad_callback(state, handle, grad_to_offload)
+
+@no_type_check
+def new_pre_backward_hook(
+    state: _FSDPState,
+    module: nn.Module,
+    handle: FlatParamHandle,
+    *unused: Any,
+) -> Any:
+    """
+    Prepares ``_handle`` 's ``FlatParameter`` s for gradient computation.
+
+    Args:
+        module (nn.Module): Fully sharded module (see [Note: Fully Sharded
+            Module]).
+    """
+    # Only run the pre-backward hook once per group of handles involved in the
+    # same module forward computation
+    if handle and handle._ran_pre_backward_hook:
+        return
+
+    with torch.profiler.record_function("FullyShardedDataParallel._pre_backward_hook"):
+        # Queue the post-backward callback once for the root FSDP instance to
+        # attach it to the outermost backward graph task so that it is called
+        # after all backward calls complete
+        if state._is_root and not state._post_backward_callback_queued:
+            _runtime_utils._register_post_backward_final_callback(state, module)
+            _runtime_utils._reset_flat_param_grad_info_if_needed(state._all_handles)
+        elif handle:
+            allowed_states = [TrainingState.IDLE]
+            if _is_composable(state):
+                allowed_states.append(TrainingState.FORWARD_BACKWARD)
+            _assert_in_training_states(state, allowed_states)
+        state.training_state = TrainingState.FORWARD_BACKWARD
+        # Queueing the post-backward callback is the only logic that is not
+        # per-handle in the pre-backward hook, so we can return early here if
+        # there are no handles.
+        if not handle:
+            return
+        handle._training_state = HandleTrainingState.BACKWARD_PRE
+
+        if handle._needs_pre_backward_unshard:
+            # If the handles have been prefetched, then there is no need to
+            # call `_unshard()` again
+            if not handle._prefetched:
+                _runtime_utils._unshard(
+                    state,
+                    handle,
+                    state._unshard_stream,
+                    state._pre_unshard_stream,
+                )
+            state._device_handle.current_stream().wait_stream(state._unshard_stream)
+
+        # Set this to `False` to ensure that a mistargeted prefetch does not
+        # actually unshard these handles
+        if handle.is_moe_layer:
+            with state._device_handle.stream(state._post_backward_stream):
+                if handle.pre_backward_event is not None:
+                    torch.cuda.current_stream().wait_event(handle.pre_backward_event)
+                get_delayed_gradient().execute_pending_gradinet()
+        handle._needs_pre_backward_unshard = False
+        with torch.profiler.record_function(
+            "FullyShardedDataParallel._pre_backward_prefetch"
+        ):
+            _runtime_utils._prefetch_handle(state, handle, _runtime_utils._PrefetchMode.BACKWARD)
+        handle.prepare_gradient_for_backward()
+        handle._ran_pre_backward_hook = True
+
+_runtime_utils.explicit_reduce_grad = explicit_reduce_grad
+_runtime_utils._pre_backward_hook = new_pre_backward_hook
+
+from torch.distributed.fsdp._exec_order_utils import _ExecOrderData, _ExecOrderWarnStatus
+
+def new_init_exec_order_data(
+        self,
+        debug_level: dist.DebugLevel,
+        backward_prefetch_limit: int,
+        forward_prefetch_limit: int,
+    ) -> None:
+        # Tracks the (static) pre-forward order for execution order validation
+        # and forward prefetching
+        self.handles_pre_forward_order: List[FlatParamHandle] = []
+        # Tracks the post-forward order for pre-backward prefetching
+        self.handles_post_forward_order: List[Optional[FlatParamHandle]] = []
+        self._iter = 0
+
+        # FSEP UPD: Modify prefetch limit
+        backward_prefetch_limit = 2
+        forward_prefetch_limit = 2
+        # Gives the max number of backward/forward prefetched all-gathers by a
+        # single module
+        self._backward_prefetch_limit = backward_prefetch_limit
+        self._forward_prefetch_limit = forward_prefetch_limit
+
+        # Data structures for execution order validation
+        self._checking_order: bool = debug_level in [
+            dist.DebugLevel.INFO,
+            dist.DebugLevel.DETAIL,
+        ]
+        self.process_group: Optional[dist.ProcessGroup] = None
+        self.world_size: Optional[int] = None
+        self.all_handles: List[FlatParamHandle] = []
+        # Names are prefixed from the root module
+        self.param_to_fqn: Dict[nn.Parameter, List[str]] = {}
+        # Current index in the pre-forward execution order
+        self.current_order_index = 0
+        self.warn_status = _ExecOrderWarnStatus.NONE
+
+_ExecOrderData.__init__ = new_init_exec_order_data

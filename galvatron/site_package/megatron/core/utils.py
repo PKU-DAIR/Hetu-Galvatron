@@ -1731,3 +1731,25 @@ def get_batch_on_this_cp_rank(batch: Dict[str, Any]):
                 batch[key] = val
 
     return batch
+
+from torch.distributed.fsdp import _runtime_utils
+
+class DelayedGradient:
+    def __init__(self):
+        self.pending_reduces = []
+        self.grad_views = {}
+
+    def delay_gradient(self, handle, state):
+        flat_param = handle.flat_param
+        self.grad_views[handle] = flat_param.grad.data
+        flat_param.grad = None
+        self.pending_reduces.append((handle, state))
+    
+    def execute_pending_gradinet(self):
+        for handle, state in self.pending_reduces:
+            if handle in self.grad_views:
+                # handle.flat_param.grad = self.grad_views[handle]
+                assert handle.uses_sharded_strategy
+                _runtime_utils.explicit_reduce_grad(state, handle, self.grad_views)
+                del self.grad_views[handle]
+        self.pending_reduces.clear()

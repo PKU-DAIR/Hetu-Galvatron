@@ -10,7 +10,7 @@ from typing import Callable, List, Optional
 
 import torch
 
-from .utils import GlobalMemoryBuffer, is_torch_min_version
+from .utils import GlobalMemoryBuffer, is_torch_min_version, DelayedGradient
 
 # Intra-layer model parallel group that the current rank belongs to.
 _TENSOR_MODEL_PARALLEL_GROUP = None
@@ -118,6 +118,8 @@ _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP = None
 
 # Memory buffers to avoid dynamic memory allocation
 _GLOBAL_MEMORY_BUFFER = None
+
+_DELAYED_GRADIENT = None
 
 # MOE logging
 _MOE_LAYER_WISE_LOGGING_TRACKER = {}
@@ -2160,3 +2162,21 @@ def set_data_parallel_group(group):
 def set_tensor_model_parallel_src_rank(rank):
     global _TENSOR_MODEL_PARALLEL_SRC_RANK
     _TENSOR_MODEL_PARALLEL_SRC_RANK = rank
+
+def set_delayed_gradient():
+    """Initialize global buffer."""
+    global _DELAYED_GRADIENT
+    assert _DELAYED_GRADIENT is None, 'delayed gradient is already initialized'
+    _DELAYED_GRADIENT = DelayedGradient()
+
+
+def get_delayed_gradient():
+    """Return the global GlobalMemoryBuffer object"""
+    assert _DELAYED_GRADIENT is not None, 'delayed gradient is not initialized'
+    return _DELAYED_GRADIENT
+
+
+def destroy_delayed_gradient():
+    """Sets the global memory buffer to None"""
+    global _DELAYED_GRADIENT
+    _DELAYED_GRADIENT = None

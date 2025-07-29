@@ -32,6 +32,7 @@ else:
     )
 
 from megatron.core import parallel_state
+from megatron.core.parallel_state import get_delayed_gradient
 from torch.distributed.fsdp._runtime_utils import (
     _low_precision_hook_enabled,
     _post_backward_reshard,
@@ -122,10 +123,13 @@ def _post_backward_hook_sp(
                     flat_param.grad.data[offset : offset + size].copy_(all_ln_data[idx : idx + size])
                     idx += size
 
-            if handle.uses_sharded_strategy:
-                _runtime_utils._reduce_grad(state, handle)
+            if handle.is_moe_layer:
+                get_delayed_gradient().delay_gradient(handle, state)
             else:
-                _reduce_grad_no_shard(state, handle)
+                if handle.uses_sharded_strategy:
+                    _runtime_utils._reduce_grad(state, handle)
+                else:
+                    _reduce_grad_no_shard(state, handle)
             # Since the unsharded gradient is produced in the computation
             # stream and consumed in the post-backward stream, inform the
             # caching allocator (before it goes out of scope)
