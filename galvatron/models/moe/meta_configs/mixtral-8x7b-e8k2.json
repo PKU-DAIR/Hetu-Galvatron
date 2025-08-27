@@ -10,5 +10,5 @@
     "vocab_size": 32000, 
     "rms_norm_eps": 1e-05,
     "rope_theta": 1000000.0,
-    "router_aux_loss_coef": 0.02
+    "router_aux_loss_coef": 0.0
   }

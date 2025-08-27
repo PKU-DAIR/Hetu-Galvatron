@@ -105,10 +105,21 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
                     ],
                     dim=1,
                 ).reshape((-1, args.hidden_size))
+                if args.add_qkv_bias:
+                    bias = torch.cat(
+                        [
+                            checkpoint["self_attn.q_proj.bias"].reshape((ng, dim * nh // ng)),
+                            checkpoint["self_attn.k_proj.bias"].reshape((ng, dim)),
+                            checkpoint["self_attn.v_proj.bias"].reshape((ng, dim)),
+                        ],
+                        dim=1,
+                    ).reshape(-1)
                 weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                     weight.shape[0], rank, world_size
                 )
                 submodule.weight.copy_(weight[weight_start_index:weight_end_index].contiguous())
+                if args.add_qkv_bias:
+                    submodule.bias.copy_(bias[weight_start_index:weight_end_index].contiguous())
             elif name.endswith("linear_proj"):
                 # o: hidden_size, num_heads * head_dim
                 weight = checkpoint["self_attn.o_proj.weight"].to(device="cuda", dtype=torch.float32)

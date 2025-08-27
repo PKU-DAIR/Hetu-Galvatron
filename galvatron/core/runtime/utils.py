@@ -134,7 +134,8 @@ def clip_grad_norm(model, max_norm, norm_type=2):
         grads_for_norm.append(params.grad)
 
     total_norm = get_grad_norm_fp32(grads_for_norm, norm_type)
-    clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm)
+    if max_norm > 0:
+        clip_grad_by_total_norm_fp32(parameters, max_norm, total_norm)
 
     return total_norm
 

@@ -111,16 +111,55 @@ def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, 
         
         # Call linear_programming_solve
         start_time = time.time()
-        
-        max_load, obj_value, A_res = optimizer.greedy_load_balancing_heuristic(
-            E=E,
-            n_device=n_device,
-            n_expert=num_experts,
-            C_e=C_e,
-        )
 
+        # print(task_data["solver"])
+
+        if task_data["solver"] == "SMART":
+            # print(f"{task_data['solver_iter'] = }")
+            if task_data["solver_iter"] % 20 == 0:
+            # print("ENABLE SMART")
+                max_load, obj_value, A_res = optimizer.smartmoe_method(
+                    E=E,
+                    n_device=n_device,
+                    n_expert=num_experts,
+                    C_e=C_e,
+                )
+            else:
+                max_load, obj_value, A_res = optimizer.keep_previous(
+                    global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
+                )
+        elif task_data["solver"] == "FSEP":
+            max_load, obj_value, A_res = optimizer.greedy_load_balancing_heuristic(
+                E=E,
+                n_device=n_device,
+                n_expert=num_experts,
+                C_e=C_e,
+            )
+        elif task_data["solver"] == "FLEX":
+            max_load, obj_value, A_res = optimizer.flexmoe_method(
+                E=E,
+                n_device=n_device,
+                n_expert=num_experts,
+                C_e=C_e,
+                global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
+            )
+        else:
+            max_load, obj_value, A_res = optimizer.default_placement(
+                E=E,
+                n_device=n_device,
+                n_expert=num_experts,
+                C_e=C_e,
+            )
+
+        # print(task_data["task_id"], A_res)
+        location = [0 for _ in range(num_experts)]
+        for i, A in enumerate(A_res):
+            for j, expert in enumerate(A):
+                location[expert] += 1
+        max_location = max(location)
+        
         expert_placement = torch.tensor(A_res, dtype=torch.int32, device="cpu")
-        global_expert_locations = torch.full((num_experts, C_e * n_device), -1, dtype=torch.int32, device="cpu")
+        global_expert_locations = torch.full((num_experts, max_location), -1, dtype=torch.int32, device="cpu")
         location = [0 for _ in range(num_experts)]
         inverse_expert_map = torch.zeros(C_e * n_device, dtype=torch.int32, device="cpu")
         
@@ -184,6 +223,7 @@ class AsyncLinearProgrammingSolver:
         self.num_experts = num_experts
         self.expert_capacity_per_device = expert_capacity_per_device
         self.num_workers = num_workers
+        self.solver = os.getenv("SOLVER")
         
         # Communication queues
         self.task_queue = Queue()
@@ -259,7 +299,9 @@ class AsyncLinearProgrammingSolver:
     def submit_optimization_task(self, 
                                 history_data: torch.Tensor,
                                 layer_number: int,
-                                task_id: Optional[str] = None) -> Optional[str]:
+                                task_id: Optional[str] = None,
+                                solver_iter: int = 0,
+                                global_expert_indices_numpy: np.ndarray = None) -> Optional[str]:
         """
         Submit linear programming optimization task to worker pool
         
@@ -282,7 +324,10 @@ class AsyncLinearProgrammingSolver:
             "ep_size": self.ep_size,
             "num_experts": self.num_experts,
             "expert_capacity_per_device": self.expert_capacity_per_device,
-            "timestamp": time.time()
+            "timestamp": time.time(),
+            "solver": self.solver,
+            "solver_iter": solver_iter,
+            "global_expert_indices_numpy": global_expert_indices_numpy,
         }
         
         # Add to pending tasks and submit to queue
@@ -309,12 +354,14 @@ class AsyncLinearProgrammingSolver:
             
             # Convert numpy arrays back to tensors
             if result.get("status") == "success":
+                result["expert_placement_numpy"] = result["expert_placement"]
                 result["expert_placement"] = torch.from_numpy(result["expert_placement"])
                 result["inverse_expert_map"] = torch.from_numpy(result["inverse_expert_map"])
                 result["global_expert_locations"] = torch.from_numpy(result["global_expert_locations"])
             
             return result
         
+        print(f"Need to wait for task {task_id}...")
         # Wait for result with timeout
         if timeout > 0 and task_id in self.pending_tasks:
             start_time = time.time()
@@ -325,6 +372,7 @@ class AsyncLinearProgrammingSolver:
                     
                     # Convert numpy arrays back to tensors
                     if result.get("status") == "success":
+                        result["expert_placement_numpy"] = result["expert_placement"]
                         result["expert_placement"] = torch.from_numpy(result["expert_placement"])
                         result["inverse_expert_map"] = torch.from_numpy(result["inverse_expert_map"])
                         result["global_expert_locations"] = torch.from_numpy(result["global_expert_locations"])
@@ -434,7 +482,9 @@ def submit_lp_optimization(history_data: torch.Tensor,
                           computation_config_path: str,
                           network_config_path: str,
                           expert_capacity_per_device: int,
-                          num_workers: int = 1) -> Optional[str]:
+                          num_workers: int = 1,
+                          solver_iter: int = 0,
+                          global_expert_indices_numpy: np.ndarray = None) -> Optional[str]:
     """
     Submit linear programming optimization task (simplified interface)
     
@@ -456,10 +506,10 @@ def submit_lp_optimization(history_data: torch.Tensor,
     )
     if solver is None:
         return None
-    return solver.submit_optimization_task(history_data, layer_number)
+    return solver.submit_optimization_task(history_data, layer_number, solver_iter=solver_iter, global_expert_indices_numpy=global_expert_indices_numpy)
 
 
-def get_lp_optimization_result(task_id: str, timeout: float = 0.0) -> Optional[Dict[str, Any]]:
+def get_lp_optimization_result(task_id: str, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
     """
     Get linear programming optimization result (simplified interface)
     

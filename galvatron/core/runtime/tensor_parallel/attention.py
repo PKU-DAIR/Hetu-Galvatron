@@ -779,7 +779,7 @@ class SelfAttention(Attention):
             self.q_layernorm = build_module(
                 submodules.q_layernorm,
                 hidden_size=self.hidden_size_per_attention_head,
-                config=self.config,
+                # config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
         else:
@@ -789,7 +789,7 @@ class SelfAttention(Attention):
             self.k_layernorm = build_module(
                 submodules.k_layernorm,
                 hidden_size=self.hidden_size_per_attention_head,
-                config=self.config,
+                # config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
         else:

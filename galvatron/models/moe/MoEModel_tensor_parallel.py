@@ -6,6 +6,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEm
 from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinear, VocabParallelEmbedding
 from megatron.core.transformer.enums import AttnMaskType, AttnType
 from megatron.training.arguments import core_transformer_config_from_args
+from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
 from torch import nn
 
 from galvatron.core import get_args
@@ -33,6 +34,12 @@ class MoEAttention_tp(nn.Module):
         megatron_config = core_transformer_config_from_args(args)
         self.tp_group = tp_group.group if tp_group is not None else None
         self.sp_group = sp_group.group if sp_group is not None else None
+        if args.qk_layernorm:
+            q_layernorm = RMSNorm
+            k_layernorm = RMSNorm
+        else:
+            q_layernorm = None
+            k_layernorm = None
         self.attention = SelfAttention(
             megatron_config,
             SelfAttentionSubmodules(
@@ -41,6 +48,8 @@ class MoEAttention_tp(nn.Module):
                 flash_attention=FlashSelfOrCrossAttention,
                 dist_attention=DistributedAttention,
                 linear_proj=RowParallelLinear,
+                q_layernorm=q_layernorm,
+                k_layernorm=k_layernorm,
             ),
             layer_number,
             attn_mask_type=AttnMaskType.causal,
@@ -116,6 +125,7 @@ class MoEMLP_tp(nn.Module):
             self.mlp = ParallelMLP(megatron_config, tp_group=self.tp_group)
             return
         args = get_args()
+        self.recompute_communication = args.recompute_communication
         self.use_fsep = args.use_fsep
         self.is_moe_layer = self.use_fsep
         self.idx = layer_number
@@ -151,7 +161,7 @@ class MoEMLP_tp(nn.Module):
             # TODO: Update solver to modify global_expert_indices
             self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
             self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
-            self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device), -1, dtype=torch.int32, device=torch.cuda.current_device())
+            self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts), -1, dtype=torch.int32, device=torch.cuda.current_device())
             for i in range(self.num_global_experts):
                 self.global_expert_locations[i, :(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts)] = torch.arange(i, self.expert_parallel_size * self.expert_capacity_per_device, self.num_global_experts, dtype=torch.int32)
             self.inverse_expert_map = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
@@ -165,6 +175,7 @@ class MoEMLP_tp(nn.Module):
             self.token_dispatcher = token_dispatcher
             self.token_dispatcher.forward_event = self.forward_event
             self.token_dispatcher.backward_event = self.backward_event
+            self.token_dispatcher.global_expert_indices_numpy = self.global_expert_indices.cpu().numpy()
         else:
             self.num_local_experts = self.config.num_moe_experts // self.expert_parallel_size
             self.token_dispatcher = token_dispatcher
@@ -195,6 +206,7 @@ class MoEMLP_tp(nn.Module):
                     self.tp_of_ep_group,
                     self.tp_and_ep_group,
                 )
+                self.real_experts.layer_number = layer_number
             else:
                 self.experts = SequentialMLP(
                     self.num_local_experts,
@@ -207,10 +219,19 @@ class MoEMLP_tp(nn.Module):
                     self.tp_and_ep_group,
                 )
 
-    def forward(self, hidden_states, tokens_per_expert):
+    def forward(self, hidden_states, tokens_per_expert, probs=None):
         if tokens_per_expert is not None:
             if self.use_fsep:
-                expert_output, mlp_bias = self.real_experts(hidden_states, tokens_per_expert)
+                if self.recompute_communication:
+                    attention_output, routing_map = hidden_states, tokens_per_expert
+                    (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
+                        attention_output, probs, routing_map
+                    )
+                    expert_output, mlp_bias = self.real_experts(dispatched_input, tokens_per_expert)
+                    mlp_output, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+                    return mlp_output, mlp_bias
+                else:
+                    expert_output, mlp_bias = self.real_experts(hidden_states, tokens_per_expert)
             else:
                 expert_output, mlp_bias = self.experts(hidden_states, tokens_per_expert)
         else:
@@ -226,6 +247,7 @@ class MoELayer_tp(nn.Module):
         self.router = MoERouter(layer_number)
 
         args = get_args()
+        self.recompute_communication = args.recompute_communication
         self.use_fsep = args.use_fsep
         self.is_moe_layer = self.use_fsep
         self.idx = layer_number
@@ -259,7 +281,7 @@ class MoELayer_tp(nn.Module):
             # TODO: Update solver to modify global_expert_indices
             self.global_expert_indices = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
             self.global_expert_indices = self.global_expert_indices.repeat(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts).reshape(self.expert_parallel_size, -1).contiguous()
-            self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device), -1, dtype=torch.int32, device=torch.cuda.current_device())
+            self.global_expert_locations = torch.full((self.num_global_experts, self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts), -1, dtype=torch.int32, device=torch.cuda.current_device())
             for i in range(self.num_global_experts):
                 self.global_expert_locations[i, :(self.expert_parallel_size * self.expert_capacity_per_device // self.num_global_experts)] = torch.arange(i, self.expert_parallel_size * self.expert_capacity_per_device, self.num_global_experts, dtype=torch.int32)
             self.inverse_expert_map = torch.tensor(range(self.num_global_experts),dtype=torch.int32,device=torch.cuda.current_device())
@@ -308,11 +330,16 @@ class MoELayer_tp(nn.Module):
             rotary_embedding,
         )
         probs, routing_map = self.router(attention_output)
-        (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
-                attention_output, probs, routing_map
-            )
-        expert_output, mlp_bias = self.mlp(dispatched_input, tokens_per_expert)
-        mlp_output, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        routing_map, probs = self.token_dispatcher.get_smart_routing(routing_map, probs)
+        if self.recompute_communication:
+            mlp_output, mlp_bias = self.mlp(attention_output, routing_map, probs)
+        else:
+            (dispatched_input, tokens_per_expert) = self.token_dispatcher.token_permutation(
+                    attention_output, probs, routing_map
+                )
+            expert_output, mlp_bias = self.mlp(dispatched_input, tokens_per_expert)
+            mlp_output, mlp_bias = self.token_dispatcher.token_unpermutation(expert_output, mlp_bias)
+        self.token_dispatcher.sync_lp_solver()
         layer_output = mlp_output + mlp_residual
         return layer_output
 
@@ -425,5 +452,8 @@ def construct_tensor_parallel_model(model, config, tp_groups_enc, sp_groups_enc,
             sp_group=sp_groups_enc[-1].group,
         ),
     )
+
+    loss_scale = torch.ones(1, device=torch.cuda.current_device())
+    MoEAuxLossAutoScaler.set_loss_scale(loss_scale / args.chunks)
 
     return model

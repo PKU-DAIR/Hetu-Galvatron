@@ -234,4 +234,9 @@ def galvatron_training_args(parser, use_megatron=True):
         help="Expert capacity per device.",
     )
 
+    group.add_argument(
+        "--recompute_communication",
+        action="store_true",
+        help="Whether to recompute communication.",
+    )
     return parser

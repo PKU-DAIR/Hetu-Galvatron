@@ -7,7 +7,18 @@ from galvatron.utils import dict_join_dirname
 
 # ============= Meta AI Model Config Paths =============
 path_dict = {
-    "mixtral-8x7b": "mixtral-8x7b.json",
+    # "mixtral-8x7b": "mixtral-8x7b.json",
+    # "mixtral-8x7b-e64k8": "mixtral-8x7b-e64k8.json",
+    # "qwen-30BA3B": "qwen-30BA3B.json",
+    # "dbrx": "dbrx.json",
+    # "mixtral-8x7b-e16k4": "mixtral-8x7b-e16k4.json",
+    # "mixtral-8x7b-e32k8": "mixtral-8x7b-e32k8.json",
+    "qwen-8x7b-e8k2": "qwen-8x7b-e8k2.json",
+    "qwen-8x7b-e16k4": "qwen-8x7b-e16k4.json",
+    "mixtral-8x7b-e8k2": "mixtral-8x7b-e8k2.json",
+    "mixtral-8x7b-e16k4": "mixtral-8x7b-e16k4.json",
+    "mixtral-8x22b-e8k2": "mixtral-8x22b-e8k2.json",
+    "mixtral-8x22b-e16k4": "mixtral-8x22b-e16k4.json",
 }
 
 
@@ -24,6 +35,7 @@ def config_from_meta(model_type) -> MixtralConfig:
     config = MixtralConfig(
         hidden_size=params["hidden_size"],
         intermediate_size=params["intermediate_size"],
+        head_dim=params["head_dim"] if "head_dim" in params else None,
         max_position_embeddings=params["max_position_embeddings"],
         num_attention_heads=params["num_attention_heads"],
         num_experts_per_tok=params["num_experts_per_tok"],
@@ -45,9 +57,9 @@ def set_model_config(config, args, overwrite_args=True):
     # ======= Arguments --> Model Config ======
     # Overwrite all model configs by manually set arguments
     if args.set_model_config_manually:
-        
         config.hidden_size = args.hidden_size
         config.intermediate_size = args.intermediate_size
+        config.head_dim = args.head_dim
         config.max_position_embeddings = args.seq_length
         config.num_attention_heads = args.num_attention_heads
         config.num_experts_per_tok = args.num_experts_per_tok
@@ -67,6 +79,8 @@ def set_model_config(config, args, overwrite_args=True):
         if args.set_experts_manually:
             config.num_local_experts = args.num_experts
             config.num_experts_per_topk = args.num_experts_per_topk
+        if args.set_aux_loss_manually:
+            config.router_aux_loss_coef = args.router_aux_loss_coef
 
     # ======= Model Config --> Arguments ======
     overwrite_model_args(config, args)
@@ -80,6 +94,7 @@ def overwrite_model_args(config, args):
     args.is_moe_model = True
     args.hidden_size = config.hidden_size
     args.intermediate_size = config.intermediate_size
+    args.head_dim = config.head_dim
     args.seq_length = config.max_position_embeddings
     args.num_attention_heads = config.num_attention_heads
     args.num_experts_per_tok = config.num_experts_per_tok
@@ -91,6 +106,12 @@ def overwrite_model_args(config, args):
     args.rope_theta = config.rope_theta
     args.router_aux_loss_coef = config.router_aux_loss_coef
 
+    # TODO: Add grad symc for layernorm, but not need to do when tp = 1
+    if args.model_size.startswith("qwen-30"):
+        args.qk_layernorm = True
+    else:
+        args.qk_layernorm = False
+
 def overwrite_megatron_args(config, args):
     args.num_layers = config.num_hidden_layers
     args.hidden_size = config.hidden_size
@@ -98,12 +119,19 @@ def overwrite_megatron_args(config, args):
     args.seq_length = config.max_position_embeddings
     args.vocab_size = config.vocab_size
     args.num_attention_heads = config.num_attention_heads
-    args.kv_channels = args.hidden_size // args.num_attention_heads
+    if config.head_dim is not None:
+        args.kv_channels = config.head_dim
+    else:
+        args.kv_channels = args.hidden_size // args.num_attention_heads
+    # print(config.head_dim, args.kv_channels)
     args.norm_epsilon = config.rms_norm_eps
     args.hidden_dropout = 0.0
     args.attention_dropout = 0.0
     args.add_bias_linear = False
-    args.add_qkv_bias = False
+    if args.model_size.startswith("qwen-8x"):
+        args.add_qkv_bias = True
+    else:
+        args.add_qkv_bias = False
     args.swiglu = True
     args.position_embedding_type = "rope"
     args.apply_rope_fusion = True

@@ -6,7 +6,6 @@ def model_args(parser):
         type=str,
         default="mixtral-8x7b",
         help="Model size.",
-        choices=["mixtral-8x7b"],
     )
     group.add_argument(
         "--hidden_size",
@@ -19,6 +18,12 @@ def model_args(parser):
         type=int,
         default=14336,
         help="Intermediate size of transformer model.",
+    )
+    group.add_argument(
+        "--head_dim",
+        type=int,
+        default=None,
+        help="Head dimension of transformer model.",
     )
     group.add_argument(
         "--seq_length", 
@@ -79,6 +84,11 @@ def model_args(parser):
         type=float,
         default=0.02,
         help="Router aux loss coefficient",
+    )
+    group.add_argument(
+        "--set_aux_loss_manually",
+        action="store_true",
+        help="Set aux loss manually",
     )
     return parser
 

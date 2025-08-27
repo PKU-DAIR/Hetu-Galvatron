@@ -50,7 +50,7 @@ def train(args):
     optimizer, opt_param_scheduler = get_optimizer_and_param_scheduler(model, args)
 
     path = os.path.dirname(os.path.abspath(__file__))
-    profiler = get_runtime_profiler(args, path, config, start_iter=0)
+    profiler = get_runtime_profiler(args, path, config, start_iter=0, end_iter=args.train_iters)
 
     profiler.profile_memory(0, "After creating model")
     if local_rank == 0:

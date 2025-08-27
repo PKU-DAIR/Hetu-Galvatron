@@ -78,6 +78,14 @@ dp_core_ext = Extension(
     language='c++'
 )
 
+# Greedy balancer extension
+greedy_balancer_ext = Extension(
+    'greedy_balancer',
+    sources=['csrc/greedy_balancer.cpp'],
+    extra_compile_args=['-O3', '-Wall', '-shared', '-std=c++17', '-fPIC'],
+    language='c++'
+)
+
 # MoE all_to_all kernels extension
 moe_kernels_ext = None
 if MOE_KERNELS_INSTALL:
@@ -153,7 +161,7 @@ setup(
     },
     install_requires=_deps,
     setup_requires=["pybind11>=2.9.1"],
-    ext_modules=[dp_core_ext] + ([moe_kernels_ext] if moe_kernels_ext else []),
+    ext_modules=[dp_core_ext, greedy_balancer_ext] + ([moe_kernels_ext] if moe_kernels_ext else []),
     data_files=data_files
 )
 
