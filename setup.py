@@ -113,7 +113,8 @@ if MOE_KERNELS_INSTALL:
 _deps = [
     "torch==2.1.0+cu121",
     "torchvision>=0.15.2",
-    "transformers>=4.31.0",
+    "transformers==4.49.0",
+    "numpy==1.26.4",
     "h5py>=3.6.0",
     "attrs>=21.4.0",
     "yacs>=0.1.8",

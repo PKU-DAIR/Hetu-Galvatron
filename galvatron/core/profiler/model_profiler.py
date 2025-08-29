@@ -791,7 +791,7 @@ class ModelProfiler(BaseProfiler):
         profile_args = self.profiling_general_args(batch_size)
         PROFILE_ARGS = self.args2str(profile_args)
 
-        # zsh: Revise to accept extra_args_str
+        # Revise to accept extra_args_str
         if hasattr(self.args, "extra_args_str"):
             extra_args_list = self.args.extra_args_str.split("/")
             for arg in extra_args_list:
