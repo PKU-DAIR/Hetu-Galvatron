@@ -20,16 +20,7 @@ from galvatron.core.runtime.moe.prefetch.solver import MoEOptimizer
 def _worker_process(task_queue: Queue, result_queue: Queue, 
                    computation_config_path: str, network_config_path: str, hidden_size: int,
                    global_checkpoint: bool, worker_id: int):
-    """
-    Long-running worker process that handles optimization tasks
-    
-    Args:
-        task_queue: Queue to receive tasks from
-        result_queue: Queue to send results to
-        computation_config_path: Path to computation config file
-        network_config_path: Path to network config file
-        worker_id: Worker process ID
-    """
+    """Long-running worker process that handles optimization tasks"""
     try:
         # Initialize MoEOptimizer once in worker process
         optimizer = MoEOptimizer(
@@ -44,7 +35,6 @@ def _worker_process(task_queue: Queue, result_queue: Queue,
         # Main worker loop
         while True:
             try:
-                # Get task from queue (blocking)
                 task_data = task_queue.get()
                 
                 # Check for shutdown signal
@@ -52,14 +42,10 @@ def _worker_process(task_queue: Queue, result_queue: Queue,
                     print(f"Worker {worker_id} received shutdown signal")
                     break
                 
-                # Process the task
                 result = _solve_optimization_task(task_data, optimizer)
-                
-                # Send result back
                 result_queue.put(result)
                 
             except Exception as e:
-                # Handle task-specific errors
                 error_result = {
                     "task_id": task_data.get("task_id", "unknown") if 'task_data' in locals() else "unknown",
                     "status": "error",
@@ -74,16 +60,7 @@ def _worker_process(task_queue: Queue, result_queue: Queue,
 
 
 def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, Any]:
-    """
-    Solve optimization task using the pre-initialized optimizer
-    
-    Args:
-        task_data: Task data dictionary
-        optimizer: Pre-initialized MoEOptimizer instance
-        
-    Returns:
-        result: Solve result dictionary
-    """
+    """Solve optimization task using the pre-initialized optimizer"""
     try:
         # Extract parameters from task data
         history_data = task_data["history_data"]
@@ -107,43 +84,16 @@ def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, 
             E.append(device_tokens)
     
         # Set linear programming parameters
-        C_e = expert_capacity_per_device  # Number of experts each device can place
-        # TODO: Modify m_token automatically
-        M_token = 4096 * 2  # Token size (bytes), simplified to 1
-        
+        C_e = expert_capacity_per_device
         # Call linear_programming_solve
         start_time = time.time()
 
-        # print(task_data["solver"])
-
-        if task_data["solver"] == "SMART":
-            # print(f"{task_data['solver_iter'] = }")
-            if task_data["solver_iter"] % 20 == 0:
-            # print("ENABLE SMART")
-                max_load, obj_value, A_res = optimizer.smartmoe_method(
-                    E=E,
-                    n_device=n_device,
-                    n_expert=num_experts,
-                    C_e=C_e,
-                )
-            else:
-                max_load, obj_value, A_res = optimizer.keep_previous(
-                    global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
-                )
-        elif task_data["solver"] == "FSEP":
+        if task_data["solver"] == "LAER":
             max_load, obj_value, A_res = optimizer.greedy_load_balancing_heuristic(
                 E=E,
                 n_device=n_device,
                 n_expert=num_experts,
                 C_e=C_e,
-            )
-        elif task_data["solver"] == "FLEX":
-            max_load, obj_value, A_res = optimizer.flexmoe_method(
-                E=E,
-                n_device=n_device,
-                n_expert=num_experts,
-                C_e=C_e,
-                global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
             )
         else:
             max_load, obj_value, A_res = optimizer.default_placement(
@@ -153,7 +103,7 @@ def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, 
                 C_e=C_e,
             )
 
-        # print(task_data["task_id"], A_res)
+        # Process expert placement results
         location = [0 for _ in range(num_experts)]
         for i, A in enumerate(A_res):
             for j, expert in enumerate(A):
@@ -179,7 +129,7 @@ def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, 
             "layer_number": layer_number,
             "max_load": max_load,
             "objective_value": obj_value,
-            "expert_placement": expert_placement.numpy(),  # Convert to numpy for serialization
+            "expert_placement": expert_placement.numpy(),
             "inverse_expert_map": inverse_expert_map.numpy(),
             "global_expert_locations": global_expert_locations.numpy(),
             "solve_time": solve_time,
@@ -210,17 +160,7 @@ class AsyncLinearProgrammingSolver:
                  num_experts: int,
                  expert_capacity_per_device: int,
                  num_workers: int = 1):
-        """
-        Initialize async linear programming solver
-        
-        Args:
-            computation_config_path: Path to computation config file
-            network_config_path: Path to network config file
-            ep_size: Expert Parallel size
-            num_experts: Total number of experts
-            expert_capacity_per_device: Expert capacity per device
-            num_workers: Number of worker processes
-        """
+        """Initialize async linear programming solver"""
         self.computation_config_path = computation_config_path
         self.network_config_path = network_config_path
         self.hidden_size = hidden_size
@@ -238,7 +178,7 @@ class AsyncLinearProgrammingSolver:
         # Worker processes
         self.workers = []
         self.result_cache = {}
-        self.pending_tasks = set()  # Track pending task IDs
+        self.pending_tasks = set()
         
         # Result monitoring thread
         self.result_monitor_thread = None
@@ -275,7 +215,6 @@ class AsyncLinearProgrammingSolver:
         """Monitor result queue and cache results"""
         while not self.shutdown_flag.is_set():
             try:
-                # Check for results (non-blocking with timeout)
                 result = self.result_queue.get(timeout=0.1)
                 
                 task_id = result.get("task_id")
@@ -284,7 +223,6 @@ class AsyncLinearProgrammingSolver:
                     self.pending_tasks.discard(task_id)
                     
             except:
-                # Timeout or empty queue
                 continue
     
     def submit_optimization_task(self, 
@@ -293,24 +231,14 @@ class AsyncLinearProgrammingSolver:
                                 task_id: Optional[str] = None,
                                 solver_iter: int = 0,
                                 global_expert_indices_numpy: np.ndarray = None) -> Optional[str]:
-        """
-        Submit linear programming optimization task to worker pool
-        
-        Args:
-            history_data: Historical token distribution data [ep_size, num_experts]
-            layer_number: Layer number
-            task_id: Task ID (optional)
-            
-        Returns:
-            task_id: Task identifier, None if submission failed
-        """
+        """Submit linear programming optimization task to worker pool"""
         if task_id is None:
             task_id = f"lp_layer_{layer_number}_task_{int(time.time() * 1000)}_{self.device}"
         
         # Prepare task data
         task_data = {
             "task_id": task_id,
-            "history_data": history_data,  # Convert back to tensor
+            "history_data": history_data,
             "layer_number": layer_number,
             "ep_size": self.ep_size,
             "num_experts": self.num_experts,
@@ -328,16 +256,7 @@ class AsyncLinearProgrammingSolver:
         return task_id
     
     def get_optimization_result(self, task_id: str, timeout: float = 0.0) -> Optional[Dict[str, Any]]:
-        """
-        Get linear programming optimization result
-        
-        Args:
-            task_id: Task ID
-            timeout: Timeout in seconds
-            
-        Returns:
-            result: Optimization result, None if not completed
-        """
+        """Get linear programming optimization result"""
         # Check if result is already cached
         if task_id in self.result_cache:
             result = self.result_cache.pop(task_id)
@@ -369,7 +288,7 @@ class AsyncLinearProgrammingSolver:
                         result["global_expert_locations"] = torch.from_numpy(result["global_expert_locations"])
                     
                     return result
-                time.sleep(0.001)  # 1ms
+                time.sleep(0.001)
         
         return None
     
@@ -382,7 +301,7 @@ class AsyncLinearProgrammingSolver:
         
         # Send shutdown signals to workers
         for _ in self.workers:
-            self.task_queue.put(None)  # Shutdown signal
+            self.task_queue.put(None)
         
         # Wait for workers to finish
         for worker in self.workers:
@@ -414,20 +333,7 @@ def get_or_create_lp_solver(computation_config_path: str,
                            num_experts: int,
                            expert_capacity_per_device: int,
                            num_workers: int = 1) -> Optional[AsyncLinearProgrammingSolver]:
-    """
-    Get or create global linear programming solver instance
-    
-    Args:
-        computation_config_path: Path to computation config file
-        network_config_path: Path to network config file
-        ep_size: Expert Parallel size
-        num_experts: Total number of experts
-        expert_capacity_per_device: Expert capacity per device
-        num_workers: Number of worker processes
-        
-    Returns:
-        solver: Async solver instance, None if unavailable
-    """
+    """Get or create global linear programming solver instance"""
     global _global_lp_solver
 
     # Check if already exists and parameters match
@@ -469,20 +375,7 @@ def submit_lp_optimization(history_data: torch.Tensor,
                           num_workers: int = 1,
                           solver_iter: int = 0,
                           global_expert_indices_numpy: np.ndarray = None) -> Optional[str]:
-    """
-    Submit linear programming optimization task (simplified interface)
-    
-    Args:
-        history_data: Historical token distribution data
-        layer_number: Layer number
-        computation_config_path: Path to computation config file
-        network_config_path: Path to network config file
-        expert_capacity_per_device: Expert capacity per device
-        num_workers: Number of worker processes
-        
-    Returns:
-        task_id: Task ID, None if submission failed
-    """
+    """Submit linear programming optimization task (simplified interface)"""
     ep_size, num_experts = history_data.shape
     solver = get_or_create_lp_solver(
         computation_config_path, network_config_path, hidden_size, global_checkpoint,
@@ -494,16 +387,7 @@ def submit_lp_optimization(history_data: torch.Tensor,
 
 
 def get_lp_optimization_result(task_id: str, timeout: float = 1.0) -> Optional[Dict[str, Any]]:
-    """
-    Get linear programming optimization result (simplified interface)
-    
-    Args:
-        task_id: Task ID
-        timeout: Timeout in seconds
-        
-    Returns:
-        result: Optimization result, None if not completed
-    """
+    """Get linear programming optimization result (simplified interface)"""
     global _global_lp_solver
     if _global_lp_solver is None:
         return None

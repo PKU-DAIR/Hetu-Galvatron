@@ -1,6 +1,5 @@
-
-INPUT_PATH=/mnt/bn/wyj-data-lq/lxy/Mixtral-8x7B-v0.1
-OUTPUT_PATH=/mnt/bn/wyj-data-lq/lxy/checkpoint/mixtral-split
+INPUT_PATH={your_checkpoint_input_path}
+OUTPUT_PATH={your_checkpoint_output_path}
 
 CHECKPOINT_ARGS="
     --input_checkpoint $INPUT_PATH \

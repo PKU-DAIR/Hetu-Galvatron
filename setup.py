@@ -111,7 +111,7 @@ if MOE_KERNELS_INSTALL:
         moe_kernels_ext = None
 
 _deps = [
-    "torch>=2.0.1",
+    "torch==2.1.0+cu121",
     "torchvision>=0.15.2",
     "transformers>=4.31.0",
     "h5py>=3.6.0",
@@ -140,8 +140,6 @@ setup(
     description="Galvatron, a Efficient Transformer Training Framework for Multiple GPUs Using Automatic Parallelism",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    author="Yujie Wang, Shenhan Zhu, Xinyi Liu",
-    author_email="alfredwang@pku.edu.cn, shenhan.zhu@pku.edu.cn, xy.liu@stu.pku.edu.cn",
     packages=find_packages(
         exclude=(
             "build",
