@@ -31,8 +31,10 @@ except ImportError:
 class MoEOptimizer:
     """MoE communication optimization solver with multiple algorithms"""
     
-    def __init__(self, computation_config_path: str, network_config_path: str):
+    def __init__(self, computation_config_path: str, network_config_path: str, hidden_size: int, global_checkpoint: bool):
         self.load_configs(computation_config_path, network_config_path)
+        self.hidden_size = hidden_size
+        self.global_checkpoint = global_checkpoint
         
     def load_configs(self, computation_config_path: str, network_config_path: str):
         """Load configuration files"""
@@ -341,6 +343,8 @@ class MoEOptimizer:
                                         E,
                                         C_e, ) -> Tuple:
         """Greedy load balancing heuristic with expert replication"""
+        return gb.greedy_load_balancing_heuristic_complete(n_device, n_expert, E, C_e, self.hidden_size * 2, 2, self.v_comp, self.V_intra, self.V_inter, self.global_checkpoint)
+        
         return gb.greedy_load_balancing_heuristic(n_device, n_expert, E, C_e)
         # Step 1: Determine expert replication strategy
         total_capacity = n_device * C_e

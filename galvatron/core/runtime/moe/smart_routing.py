@@ -127,6 +127,8 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
             "enabled": os.environ.get("ENABLE_SOLVER", "0") == "1",
             "computation_config_path": getattr(args, 'moe_computation_config_path', './configs/computation_profiling_bf16_mixtral-8x7b.json'),
             "network_config_path": getattr(args, 'moe_network_config_path', './configs/network_config.json'),
+            "hidden_size": getattr(args, 'hidden_size', 4096),
+            "global_checkpoint": getattr(args, 'global_checkpoint', True),
             "expert_capacity_per_device": self.num_local_experts
         }
         self.async_lp_task_id = None
@@ -841,6 +843,8 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 computation_config_path=self.async_lp_solver_config["computation_config_path"],
                 network_config_path=self.async_lp_solver_config["network_config_path"],
                 expert_capacity_per_device=self.async_lp_solver_config["expert_capacity_per_device"],
+                hidden_size=self.async_lp_solver_config["hidden_size"],
+                global_checkpoint=self.async_lp_solver_config["global_checkpoint"],
                 solver_iter=self.solver_iter,
                 global_expert_indices_numpy=self.global_expert_indices_numpy,
             )

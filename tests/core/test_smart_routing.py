@@ -4,7 +4,7 @@ import os
 from unittest.mock import patch
 import random
 
-# 添加项目路径到sys.path
+# Add project path to sys.path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from galvatron.core.runtime.moe.smart_routing import MoEAlltoAllSmartTokenDispatcher
@@ -16,12 +16,10 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 @patch('megatron.core.parallel_state.get_expert_model_parallel_rank', return_value=0)
 @patch('megatron.core.parallel_state.get_expert_tensor_parallel_rank', return_value=0)
 def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, mock_tp_world_size):
-    """
-    测试get_smart_routing_map函数
-    """
+    """Test get_smart_routing_map function"""
     print("Testing get_smart_routing_map")
     
-    # 准备测试数据 - 基于用户提供的输入
+    # Prepare test data based on user input
     num_global_tokens_per_expert = torch.tensor([[[504, 632, 608, 549, 424, 557, 313, 509],
                                                    [429, 584, 603, 525, 476, 644, 301, 534],
                                                    [434, 665, 609, 538, 422, 586, 326, 516],
@@ -48,7 +46,7 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
     print(f"  global_expert_indices: {global_expert_indices.shape}")
     print()
     
-    # 创建配置和dispatcher
+    # Create config and dispatcher
     config = TransformerConfig(
         num_moe_experts=8,
         moe_router_topk=2,
@@ -57,8 +55,8 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
         num_layers=24,
     )
     
-    # 创建dispatcher实例
-    local_expert_indices = [0, 1]  # 假设当前rank的本地专家
+    # Create dispatcher instance
+    local_expert_indices = [0, 1]  # Assume current rank's local experts
     num_local_experts = 2
     
     dispatcher = MoEAlltoAllSmartTokenDispatcher(
@@ -68,7 +66,7 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
         config=config
     )
     
-    # 调用get_smart_routing_map
+    # Call get_smart_routing_map
     print("Calling get_smart_routing_map...")
     result = dispatcher.get_smart_routing_map(num_global_tokens_per_expert, global_expert_indices)
     result = result.to(device='cpu')
@@ -79,7 +77,7 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
           f"num_local_experts * ep_size={num_local_experts * num_global_tokens_per_expert.shape[1]}]")
     print()
     
-    # 验证输出维度
+    # Verify output dimensions
     tp_size, ep_size, num_global_experts = num_global_tokens_per_expert.shape
     _, num_local_experts_from_indices = global_expert_indices.shape
     expected_output_shape = (tp_size, ep_size, ep_size * num_local_experts_from_indices)
@@ -87,7 +85,7 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
     assert result.shape == expected_output_shape, f"Expected shape {expected_output_shape}, got {result.shape}"
     print("Output shape is correct")
     
-    # 验证token守恒 - 总的输入token数应该等于总的输出token数
+    # Verify token conservation
     total_input_tokens = num_global_tokens_per_expert.sum()
     total_output_tokens = result.sum()
     
@@ -97,10 +95,10 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
     assert abs(total_input_tokens - total_output_tokens) < 1e-6, "Token conservation failed"
     print("Token conservation verified")
     
-    # 分析路由策略效果
+    # Analyze routing performance
     print("\nRouting Analysis:")
     
-    # 分析节点内 vs 节点间通信
+    # Analyze intra-node vs inter-node communication
     gpus_per_node = 8
     intra_node_tokens = 0
     inter_node_tokens = 0
@@ -122,7 +120,7 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
     print(f"Inter-node tokens: {inter_node_tokens}")
     print(f"Intra-node ratio: {intra_node_tokens / (intra_node_tokens + inter_node_tokens) * 100:.2f}%")
     
-    # 检查专家负载均衡
+    # Check expert load balancing
     print("\nLoad Balancing Analysis:")
     expert_loads = torch.zeros(num_global_experts)
     
@@ -138,7 +136,7 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
     print(f"Load std: {expert_loads.std():.2f}")
     print(f"Load mean: {expert_loads.mean():.2f}")
     
-    # 验证每个专家都有对应的副本
+    # Verify expert replication
     expert_locations = {}
     for rank in range(ep_size):
         for local_idx in range(num_local_experts_from_indices):
@@ -159,16 +157,14 @@ def test_get_smart_routing_map(mock_tp_rank, mock_ep_rank, mock_ep_world_size, m
 @patch('megatron.core.parallel_state.get_expert_model_parallel_rank', return_value=0)
 @patch('megatron.core.parallel_state.get_expert_tensor_parallel_rank', return_value=0)
 def test_get_new_routing_map(result, mock_tp_rank, mock_ep_rank, mock_ep_world_size, mock_tp_world_size):
-    """
-    测试get_new_routing_map函数 - 针对rank0的数据
-    """
+    """Test get_new_routing_map function for rank0 data"""
     print("\nTesting get_new_routing_map")
     
-    # 使用rank0的实际数据: [504, 632, 608, 549, 424, 557, 313, 509]
+    # Use rank0 actual data
     rank0_data = [504, 632, 608, 549, 424, 557, 313, 509]
     new_num_global_tokens_per_expert = result
 
-    # 创建配置和dispatcher
+    # Create config and dispatcher
     config = TransformerConfig(
         num_moe_experts=8,
         moe_router_topk=2,
@@ -208,7 +204,7 @@ def test_get_new_routing_map(result, mock_tp_rank, mock_ep_rank, mock_ep_world_s
         probs[i, total[i]] = 0.8 + total[i] * 0.02
 
 
-    # 调用get_new_routing_map
+    # Call get_new_routing_map
     print("\nCalling get_new_routing_map...")
     new_routing_map, new_probs = dispatcher.get_new_routing_map(
         new_num_global_tokens_per_expert, global_expert_indices, routing_map, probs
@@ -218,7 +214,7 @@ def test_get_new_routing_map(result, mock_tp_rank, mock_ep_rank, mock_ep_world_s
     print(f"  new_routing_map shape: {new_routing_map.shape}")
     print(f"  new_probs shape: {new_probs.shape}")
     
-    # 统计结果
+    # Collect statistics
     original_token_count = routing_map.sum().item()
     new_token_count = new_routing_map.sum().item()
     new_location_loads = new_routing_map.sum(dim=0)
@@ -227,7 +223,7 @@ def test_get_new_routing_map(result, mock_tp_rank, mock_ep_rank, mock_ep_world_s
     print(f"  New total tokens: {new_token_count}")
     print(f"  New tokens per location: {new_location_loads}")
     
-    # 验证基本约束
+    # Verify basic constraints
     assert new_token_count == original_token_count, "Token count should not increase"
     
     print("✓ All basic checks passed!")
@@ -236,13 +232,13 @@ def test_get_new_routing_map(result, mock_tp_rank, mock_ep_rank, mock_ep_world_s
     return new_routing_map, new_probs
 
 if __name__ == "__main__":
-    # 设置随机种子保证结果可重现
+    # Set random seed for reproducibility
     torch.manual_seed(42)
     random.seed(42)
     
-    # 运行测试
+    # Run tests
     result = test_get_smart_routing_map()
     
     print(result)
-    # 测试get_new_routing_map函数
+    # Test get_new_routing_map function
     new_routing_map, new_probs = test_get_new_routing_map(result)

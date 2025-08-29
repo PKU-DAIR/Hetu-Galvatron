@@ -18,8 +18,8 @@ from galvatron.core.runtime.moe.prefetch.solver import MoEOptimizer
 
 
 def _worker_process(task_queue: Queue, result_queue: Queue, 
-                   computation_config_path: str, network_config_path: str,
-                   worker_id: int):
+                   computation_config_path: str, network_config_path: str, hidden_size: int,
+                   global_checkpoint: bool, worker_id: int):
     """
     Long-running worker process that handles optimization tasks
     
@@ -34,7 +34,9 @@ def _worker_process(task_queue: Queue, result_queue: Queue,
         # Initialize MoEOptimizer once in worker process
         optimizer = MoEOptimizer(
             computation_config_path=computation_config_path,
-            network_config_path=network_config_path
+            network_config_path=network_config_path,
+            hidden_size = hidden_size,
+            global_checkpoint=global_checkpoint,
         )
         
         print(f"Worker {worker_id} initialized successfully")
@@ -202,6 +204,8 @@ class AsyncLinearProgrammingSolver:
     def __init__(self, 
                  computation_config_path: str,
                  network_config_path: str,
+                 hidden_size: int,
+                 global_checkpoint: bool,
                  ep_size: int,
                  num_experts: int,
                  expert_capacity_per_device: int,
@@ -219,6 +223,8 @@ class AsyncLinearProgrammingSolver:
         """
         self.computation_config_path = computation_config_path
         self.network_config_path = network_config_path
+        self.hidden_size = hidden_size
+        self.global_checkpoint = global_checkpoint
         self.ep_size = ep_size
         self.num_experts = num_experts
         self.expert_capacity_per_device = expert_capacity_per_device
@@ -237,26 +243,11 @@ class AsyncLinearProgrammingSolver:
         # Result monitoring thread
         self.result_monitor_thread = None
         self.shutdown_flag = threading.Event()
-        
-        # Initialize MoEOptimizer (for compatibility, but workers will have their own)
-        self.optimizer = None
-        self._init_optimizer()
         self.device = torch.cuda.current_device()
         
         # Start worker processes and result monitor
         self._start_workers()
         self._start_result_monitor()
-    
-    def _init_optimizer(self):
-        """Initialize MoEOptimizer instance"""
-        try:
-            self.optimizer = MoEOptimizer(
-                computation_config_path=self.computation_config_path,
-                network_config_path=self.network_config_path
-            )
-        except Exception as e:
-            print(f"Failed to initialize optimizer: {e}")
-            self.optimizer = None
     
     def _start_workers(self):
         """Start worker processes"""
@@ -264,7 +255,7 @@ class AsyncLinearProgrammingSolver:
             worker = Process(
                 target=_worker_process,
                 args=(self.task_queue, self.result_queue, 
-                      self.computation_config_path, self.network_config_path, i),
+                      self.computation_config_path, self.network_config_path, self.hidden_size, self.global_checkpoint, i),
                 daemon=True
             )
             worker.start()
@@ -382,19 +373,6 @@ class AsyncLinearProgrammingSolver:
         
         return None
     
-    def get_status(self) -> Dict[str, Any]:
-        """Get solver status"""
-        active_workers = sum(1 for worker in self.workers if worker.is_alive())
-        
-        return {
-            "optimizer_available": self.optimizer is not None,
-            "active_workers": active_workers,
-            "total_workers": self.num_workers,
-            "pending_tasks": len(self.pending_tasks),
-            "cached_results": len(self.result_cache),
-            "task_queue_size": self.task_queue.qsize() if hasattr(self.task_queue, 'qsize') else 'unknown'
-        }
-    
     def cleanup(self):
         """Clean up resources"""
         print("Cleaning up AsyncLinearProgrammingSolver...")
@@ -430,6 +408,8 @@ _global_lp_solver = None
 
 def get_or_create_lp_solver(computation_config_path: str,
                            network_config_path: str,
+                           hidden_size: int,
+                           global_checkpoint: bool,
                            ep_size: int,
                            num_experts: int,
                            expert_capacity_per_device: int,
@@ -458,6 +438,8 @@ def get_or_create_lp_solver(computation_config_path: str,
     _global_lp_solver = AsyncLinearProgrammingSolver(
         computation_config_path=computation_config_path,
         network_config_path=network_config_path,
+        hidden_size=hidden_size,
+        global_checkpoint=global_checkpoint,
         ep_size=ep_size,
         num_experts=num_experts,
         expert_capacity_per_device=expert_capacity_per_device,
@@ -482,6 +464,8 @@ def submit_lp_optimization(history_data: torch.Tensor,
                           computation_config_path: str,
                           network_config_path: str,
                           expert_capacity_per_device: int,
+                          hidden_size: int,
+                          global_checkpoint: bool,
                           num_workers: int = 1,
                           solver_iter: int = 0,
                           global_expert_indices_numpy: np.ndarray = None) -> Optional[str]:
@@ -501,7 +485,7 @@ def submit_lp_optimization(history_data: torch.Tensor,
     """
     ep_size, num_experts = history_data.shape
     solver = get_or_create_lp_solver(
-        computation_config_path, network_config_path,
+        computation_config_path, network_config_path, hidden_size, global_checkpoint,
         ep_size, num_experts, expert_capacity_per_device, num_workers
     )
     if solver is None:

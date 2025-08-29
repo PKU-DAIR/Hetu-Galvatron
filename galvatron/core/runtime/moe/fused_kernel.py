@@ -1597,10 +1597,10 @@ def cuda_optimized_all_to_all_expert_grads(
 
     recv_buffer = get_global_memory_buffer().get_tensor([world_size * local_expert_num * expert_shard_size], padded_unsharded_grad.dtype, "p2p")
 
-    # 获取当前CUDA stream
+    # Get current CUDA stream
     stream = torch.cuda.current_stream(device).cuda_stream
     
-    # 调用CUDA kernel进行反向传播
+    # Call CUDA kernel for backward pass
     moe_all_to_all_kernels.moe_nccl_backward(
         padded_unsharded_grad,
         global_placement_cpu,
