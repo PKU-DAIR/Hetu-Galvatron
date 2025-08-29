@@ -42,6 +42,25 @@ class MoEOptimizer:
             return self.computation_config[base_key] / 4096  # ms/token
         return 0.001  # default: 1ms per token
     
+    def default_placement(self,
+                        n_device,
+                        n_expert,
+                        E,
+                        C_e,
+                        ) -> Tuple:
+        """
+        Default placement method
+        """
+        ep_size = n_expert // C_e
+        A_res = []
+        for j in range(n_device):
+            tmp = []
+            for i in range(C_e):
+                tmp.append(i * ep_size + (j % ep_size))
+            A_res.append(tmp)
+
+        return 0, 0, A_res
+
     def greedy_load_balancing_heuristic(self,
                                         n_device,
                                         n_expert,
