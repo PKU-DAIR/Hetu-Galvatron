@@ -96,7 +96,7 @@ std::vector<std::vector<int>> generate_perturbed_replicas(
     const int total_replicas = std::accumulate(base_replicas.begin(), base_replicas.end(), 0);
     
     std::random_device rd;
-    std::mt19937 gen(rd());
+    std::mt19937 gen(2333);
     std::uniform_int_distribution<> expert_dist(0, n_expert - 1);
 
     std::set<std::vector<int>> unique_replicas; // For deduplication
