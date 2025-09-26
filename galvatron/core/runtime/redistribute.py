@@ -11,6 +11,7 @@ def _zigzag_transformation(input_, cp_world_size):
     
     seq_dim = 0
     original_shape = input_.shape
+    assert 2*cp_world_size <= original_shape[0], "sequence length must be larger than 2*cp" 
     reshaped_input = input_.view(2 * cp_world_size, -1, *original_shape[1:])
     zigzag_indices = torch.zeros(2 * cp_world_size, dtype=torch.long, device=input_.device)
     for cp_rank in range(cp_world_size):
@@ -263,6 +264,7 @@ def _fused_split_allgather_along_first_dim(
         output = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
         torch.distributed.all_gather_into_tensor(output, input_.contiguous(), group=group)
         return output
+    return input_
 
 def _fused_split_allgather_along_first_dim_with_sequence_parallel(
     input_, allgather_tp_sp_group, allgather_cp_group, allgather_tp_sp_cp_group, 
@@ -277,7 +279,7 @@ def _fused_split_allgather_along_first_dim_with_sequence_parallel(
     # Bypass the function if we are using only 1 GPU.
     # if world_size == 1:
     #     return input_
-    if args.sequence_parallel and split_tp_sp_cp_group is not None:
+    if args.sequence_parallel and split_tp_sp_cp_group is not None and split_tp_sp_cp_world_size > 1:
         dim_size = list(input_.size())
         dim_size[0] = dim_size[0] * split_tp_sp_cp_world_size
         output_ = torch.empty(dim_size, dtype=input_.dtype, device=torch.cuda.current_device())
@@ -285,36 +287,46 @@ def _fused_split_allgather_along_first_dim_with_sequence_parallel(
         torch.distributed.all_gather_into_tensor(output_, input_.contiguous(), group=split_tp_sp_cp_group)
     else:
         output_ = input_.contiguous()
+    old_cp_world_size = 1 if split_cp_group is None else torch.distributed.get_world_size(group=split_cp_group)
+    new_cp_world_size = 1 if allgather_cp_group is None else torch.distributed.get_world_size(group=allgather_cp_group)
+    if old_cp_world_size != new_cp_world_size:
+        if old_cp_world_size > 1:
+            output_ = _reverse_zigzag_transformation(output_, old_cp_world_size)
+        if new_cp_world_size > 1:
+            output_ = _zigzag_transformation(output_, new_cp_world_size)
 
     if args.shape_order == "SBH":  # [s, b, h] -> [b, s, h]
         output_ = rearrange(output_, "s b h -> b s h")
 
-    if fused_split_group is not None:
-        # Split along first dimension.
-        world_size = torch.distributed.get_world_size(group=fused_split_group)
-        dim_size = output_.size()[0]
-        assert dim_size % world_size == 0, "First dimension of the tensor should be divisible by tensor parallel size"
-        local_dim_size = dim_size // world_size
-        rank = torch.distributed.get_rank(group=fused_split_group)
-        dim_offset = rank * local_dim_size
+    if fused_split_group is not None or fused_allgather_group is not None:
+        if fused_split_group is not None:
+            # Split along first dimension.
+            world_size = torch.distributed.get_world_size(group=fused_split_group)
+            dim_size = output_.size()[0]
+            # print("dim_size", dim_size, "world_size", world_size)
+            assert dim_size % world_size == 0, "First dimension of the tensor should be divisible by fused_split_group size"
+            local_dim_size = dim_size // world_size
+            rank = torch.distributed.get_rank(group=fused_split_group)
+            dim_offset = rank * local_dim_size
 
-        output = output_[dim_offset : dim_offset + local_dim_size].contiguous()
+            output = output_[dim_offset : dim_offset + local_dim_size].contiguous()
 
-    if fused_allgather_group is not None:
+        if fused_allgather_group is not None:
 
-        world_size = torch.distributed.get_world_size(group=fused_allgather_group)
+            world_size = torch.distributed.get_world_size(group=fused_allgather_group)
 
-        dim_size = list(output_.size())
-        dim_size[0] = dim_size[0] * world_size
+            dim_size = list(output_.size())
+            dim_size[0] = dim_size[0] * world_size
 
-        output = torch.empty(dim_size, dtype=output_.dtype, device=torch.cuda.current_device())
-        # print(world_size,output.shape, output_.contiguous().shape,fused_allgather_group,fused_split_group)
-        # print(torch.distributed.get_rank(group=fused_allgather_group),torch.cuda.current_device(),fused_allgather_group)
-        # torch.distributed.barrier(group=allgather_group)
-        # print("begin!",torch.cuda.current_device())
-        torch.distributed.all_gather_into_tensor(output, output_.contiguous(), group=fused_allgather_group)
-        # print("end!",torch.cuda.current_device())
-
+            output = torch.empty(dim_size, dtype=output_.dtype, device=torch.cuda.current_device())
+            # print(world_size,output.shape, output_.contiguous().shape,fused_allgather_group,fused_split_group)
+            # print(torch.distributed.get_rank(group=fused_allgather_group),torch.cuda.current_device(),fused_allgather_group)
+            # torch.distributed.barrier(group=allgather_group)
+            # print("begin!",torch.cuda.current_device())
+            torch.distributed.all_gather_into_tensor(output, output_.contiguous(), group=fused_allgather_group)
+            # print("end!",torch.cuda.current_device())
+    else:
+        output = output_
     if args.shape_order == "SBH":  # [b, s, h] -> [s, b, h]
         output = rearrange(output, "b s h -> s b h")
     # else:
@@ -329,9 +341,10 @@ def _fused_split_allgather_along_first_dim_with_sequence_parallel(
         #sp_rank = torch.distributed.get_rank(group=allgather_tp_sp_group)
         #cp_rank = torch.distributed.get_rank(group=allgather_cp_group)
         #dim_offset = sp_rank * local_dim_size + cp_rank * local_dim_size * tp_sp_world_size
-        rank = torch.distributed.get_rank(group=allgather_tp_sp_cp_group)
-        dim_offset = rank * local_dim_size
-        output = output[dim_offset : dim_offset + local_dim_size].contiguous()
+        if tp_sp_cp_world_size > 1:
+            rank = torch.distributed.get_rank(group=allgather_tp_sp_cp_group)
+            dim_offset = rank * local_dim_size
+            output = output[dim_offset : dim_offset + local_dim_size].contiguous()
     # print(input_.shape, output.shape)
     # print(output.shape, output.stride(), torch.cuda.current_device())
     return output.contiguous()

@@ -303,7 +303,7 @@ def gen_redistributed_group_with_cp(tp_size_old, tp_size_new, tp_consec_old, tp_
     tp_group_new = None if tp_size_new == 1 else tp_group_new
     cp_group_old = None if cp_size_old == 1 else cp_group_old
     cp_group_new = None if cp_size_new == 1 else cp_group_new
-    return (tp_group_old, cp_group_old, tp_group_new, cp_group_new)
+    return (tp_group_old, tp_group_new, cp_group_new, cp_group_old)
 
 # def gen_redistributed_group_with_cp(tp_size_old, tp_size_new, cp_size_old, cp_size_new, tp_group_old, tp_group_new, cp_group_old, cp_group_new):
 #     if tp_size_old * cp_size_old == tp_size_new * cp_size_new:
