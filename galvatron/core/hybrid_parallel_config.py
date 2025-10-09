@@ -28,10 +28,10 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
         pp_divide = None
         if args.use_ulysses:
             args.vocab_sp = 1
-            args.use_sp = [1] * total_layer_num
+            use_sp = [1] * total_layer_num
         else:
             args.vocab_sp = 0
-            args.use_sp = [0] * total_layer_num
+            use_sp = [0] * total_layer_num
     else:
         galvatron_config = read_json_config(args.galvatron_config_path)
         pp_deg, tp_sizes_enc, tp_consecutive_flags, dp_types_enc, use_sp, vtp, vsp = config2strategy(galvatron_config)
@@ -87,7 +87,7 @@ def get_hybrid_parallel_configs_api(config, args, model_info):
             print('   pipeline_type: %s, default_dp_type: %s, dtype: %s%s'%(args.pipeline_type, args.default_dp_type, args.mixed_precision, embed_sdp))
             print_hp_config('pp_division', pp_divide)
             print_hp_config('pp_ranks', pp_ranks_enc)
-            print_hp_config('use_sp', [use_ulysses])
+            print_hp_config('use_sp', [args.use_ulysses])
             print('================================================================================')
         else:
             print('[%s config mode] Loaded hybrid parallel config from %s:'%(config_type, config_source))

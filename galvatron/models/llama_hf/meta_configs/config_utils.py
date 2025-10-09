@@ -9,6 +9,7 @@ path_dict =  {
     'llama-13b': 'llama-13b.json',
     'llama-30b': 'llama-30b.json',
     'llama2-70b': 'llama2-70b.json',
+    'qwen2.5-72b': 'qwen2.5-72b.json',
 }
 
 def config_from_meta(model_type) -> LlamaConfig:
@@ -27,17 +28,19 @@ def config_from_meta(model_type) -> LlamaConfig:
         rms_norm_eps=params['norm_eps'],
         num_key_value_heads=params['n_kv_heads'],
         max_position_embeddings=params['n_positions'],
+        vocab_size=params['vocab_size'],
     )
     
 # ============= Set Model Config and Arguments =============
 def set_model_config(config, args, overwrite_args=True):
     config.use_cache = False
+    config.model_name = args.model_size
     # ======= Arguments --> Model Config ======
     # Overwrite all model configs by manually set arguments
     if args.set_model_config_manually:
         config.vocab_size = args.vocab_size
         config.hidden_size = args.hidden_size
-        config.intermediate_size = args.hidden_size * 8 // 3
+        config.intermediate_size = (args.hidden_size * 8 // 3 + 256 - 1) // 256 * 256
         config.num_hidden_layers = args.num_hidden_layers
         config.num_attention_heads = args.num_attention_heads
         config.max_position_embeddings = args.seq_length
@@ -79,9 +82,10 @@ def overwrite_model_args(config, args):
     args.attention_dropout = 0.0
     args.add_bias_linear = False
     args.swiglu = True
+    args.hidden_dropout = 0.0
+    args.attention_dropout = 0.0
     if getattr(args, "padded_vocab_size", None) is None:
-        args.padded_vocab_size = config.vocab_size
-        # args.padded_vocab_size = (config.vocab_size + args.make_vocab_size_divisible_by - 1 // args.make_vocab_size_divisible_by * args.make_vocab_size_divisible_by)
+        args.padded_vocab_size = (config.vocab_size + args.make_vocab_size_divisible_by - 1) // args.make_vocab_size_divisible_by * args.make_vocab_size_divisible_by
     if config.num_key_value_heads != config.num_attention_heads:
         args.group_query_attention = True
         args.num_query_groups = config.num_key_value_heads
@@ -90,8 +94,8 @@ def overwrite_model_args(config, args):
 def model_name(config, args=None):
     if hasattr(args,"profile_mode"):
         if args.profile_mode is not "sequence":
-            return 'hidden%d_head%d_seqlen%d'%(config.hidden_size, config.num_attention_heads, config.max_position_embeddings)
-    return 'hidden%d_head%d'%(config.hidden_size, config.num_attention_heads)
+            return '%s_seqlen%d'%(config.model_name, config.max_position_embeddings)
+    return '%s'%(config.model_name)
 
 def model_layer_configs(config):
     return [

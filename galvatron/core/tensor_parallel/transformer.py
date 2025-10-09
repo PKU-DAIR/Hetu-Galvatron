@@ -1911,8 +1911,8 @@ def single_all_to_all(input, scatter_idx, gather_idx, batch_dim_idx, group, asyn
             local_seq_len, bs, num_total_head, head_dim = input.shape
             assert num_total_head % seq_world_size == 0, f"Number of heads ({num_total_head}) must be divisible by the sequence parallel size ({seq_world_size})!"
             input_t = input.reshape([local_seq_len * bs, seq_world_size, num_total_head // seq_world_size,
-                                     head_dim]).contiguous()
-            input_t = input_t.transpose(0, 1).contiguous()
+                                     head_dim]).transpose(0, 1).contiguous()
+            # input_t = input_t.contiguous()
             # input_t = input.reshape([local_seq_len, bs, seq_world_size, num_total_head // seq_world_size,
             #                          head_dim]).contiguous()
             # input_t = input_t.permute(2, 0, 1, 3, 4).contiguous()

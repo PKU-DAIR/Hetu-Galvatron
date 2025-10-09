@@ -1,4 +1,4 @@
-export NUM_NODES=1
+export NUM_NODES=16
 export NUM_GPUS_PER_NODE=8
 
 MODEL_SIZE="llama-7b"
@@ -52,6 +52,7 @@ SEARCH_ARGS="
     --mixed_precision bf16 \
     --pipeline_type pipedream_flush \
     --default_dp_type zero2 \
+    --sequence_parallel \
     --embed_sdp 0
 "
 

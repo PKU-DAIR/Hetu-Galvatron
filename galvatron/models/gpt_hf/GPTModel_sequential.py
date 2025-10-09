@@ -134,7 +134,7 @@ class GPTLoss_(nn.Module):
         return logits_parallel
 
 class GPTCls_(nn.Module):
-    def __init__(self, model, parallel_loss = True, half_entorpy = True):
+    def __init__(self, model, parallel_loss = True, half_entropy = True):
         super().__init__()
         self.sequence_parallel = get_args().sequence_parallel
         self.tp_group = model.lm_head.tp_group
@@ -142,8 +142,10 @@ class GPTCls_(nn.Module):
         self.lm_head = GPTLoss_(model.lm_head.weight, self.sequence_parallel, self.tp_group)
         self.clone_scatter_output_in_embedding = get_args().clone_scatter_output_in_embedding
         self.parallel_loss = parallel_loss
-        self.half_entorpy = half_entorpy
+        self.half_entropy = half_entropy
         args = get_args()
+        if args.entropy_in_fp32:
+            self.half_entropy = False
         self.seq_length = args.seq_length
         self.vocab_sp = args.vocab_sp
         if self.vocab_sp:
@@ -166,7 +168,7 @@ class GPTCls_(nn.Module):
         # loss = tensor_parallel.vocab_parallel_cross_entropy(output.float(), input_ids)
         if not self.parallel_loss:
             output = tensor_parallel.gather_from_tensor_model_parallel_region_group(logits_parallel, self.tp_group)
-            if not self.half_entorpy:
+            if not self.half_entropy:
                 logits = output.float()
             else:
                 logits = output
@@ -184,12 +186,12 @@ class GPTCls_(nn.Module):
             loss = loss_fct(shift_logits, shift_labels)
         else:
             if not self.vocab_sp:
-                if not self.half_entorpy:
+                if not self.half_entropy:
                     loss = tensor_parallel.vocab_parallel_cross_entropy(logits_parallel.float(), labels, tp_group = self.tp_group)
                 else:
                     loss = tensor_parallel.vocab_parallel_cross_entropy(logits_parallel, labels, tp_group = self.tp_group)
             else:
-                if not self.half_entorpy:
+                if not self.half_entropy:
                     loss = tensor_parallel.vocab_sequence_parallel_cross_entropy(logits_parallel.float(), labels, self.sp_group)
                 else:
                     loss = tensor_parallel.vocab_sequence_parallel_cross_entropy(logits_parallel, labels, self.sp_group)

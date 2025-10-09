@@ -143,6 +143,12 @@ def galvatron_training_args(parser, use_megatron=True):
         'Ensure Zero3 memory cost when chunk > 1.',
         dest='async_grad_reduce'
     )
+    group.add_argument(
+        "--reduce_in_fp32", action="store_true", help="Use fp32 for gradient reduction.",
+    )
+    group.add_argument(
+        "--entropy_in_fp32", action="store_true", help="Use fp32 for entropy calculation.",
+    )
     if not use_megatron:
         group.add_argument("--lr", type=float, default=1e-4, help="Learning rate of adam")
         group.add_argument("--gpu_id", type=int, default=0, help="Id of GPU to run.")
@@ -205,6 +211,13 @@ def galvatron_profile_args(parser):
     group.add_argument(
         "--mixed_precision", type=str, default="bf16", help="Mixed precision option.", choices=["fp32", "fp16", "bf16"],
     )
+    group.add_argument("--use-fused-rmsnorm", action='store_true',
+                       help="Use fused rmsnorm.")
+    group.add_argument("--use-fused-swiglu", action='store_true',
+                       help="Use fused swiglu.")
+    group.add_argument("--use-fused-rotary-pos-emb", action='store_true',
+                       help="Use fused rotary-pos-emb.")
+    
     group.add_argument(
         "--use-flash-attn", action="store_true", help="Use FlashAttention implementation of attention."
     )
@@ -236,7 +249,19 @@ def galvatron_profile_hardware_args(parser):
         "--num_gpus_per_node", type=int, default=8, help="Number of GPUs per node.",
     )
     group.add_argument(
+        "--node_rank", type=int, default= -1, help="Rank of node.",
+    )
+    group.add_argument(
+        "--master_addr", type=str, default= 'localhost', help="Master address.",
+    )
+    group.add_argument(
+        "--master_port", type=int, default= '12345', help="Master port.",
+    )
+    group.add_argument(
         "--nccl_test_dir", type=str, default='nccl-tests', help="Directory of nccl-tests.",
+    )
+    group.add_argument(
+        "--ascend_dir", type=str, default='/usr/local/Ascend/ascend-toolkit/latest', help="Directory of ascend toolkit.",
     )
     group.add_argument(
         "--mpi_path", type=str, default='/usr/local/mpi/', help="MPI Path.",

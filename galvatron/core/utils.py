@@ -9,6 +9,7 @@ from megatron.core import mpu
 from functools import partial
 from torch.distributed.fsdp._common_utils import _named_parameters_with_duplicates
 from megatron.training.global_vars import rebuild_tokenizer
+from megatron.core.optimizer.clip_grads import clip_grad_norm_fp32
 
 # utility functions, support on nested attributes for getattr, setattr, and setattr
 # https://stackoverflow.com/questions/31174295/getattr-and-setattr-on-nested-subobjects-chained-properties
@@ -103,4 +104,14 @@ def get_layernorm_offset(model, layernorm_name=[]):
         total_ln_size.append(ln_size)
     
     return total_ln_offset, total_ln_size
+
+def clip_grad_norm(model, max_norm, norm_type=2):
+    parameters = []
+    grads_for_norm = []
+    for name, params in model.named_parameters():
+        parameters.append(params)
+        grads_for_norm.append(params.grad)
     
+    total_norm = clip_grad_norm_fp32(parameters, grads_for_norm, max_norm, norm_type)
+
+    return total_norm

@@ -5,5 +5,8 @@ from megatron.core.tensor_parallel import ColumnParallelLinear, RowParallelLinea
 from megatron.core.tensor_parallel import get_cuda_rng_tracker, split_tensor_along_last_dim
 from megatron.legacy.model.enums import AttnMaskType, LayerType, AttnType
 
+from .tp_adaptor import exe_adaptation
 from .reset import init_reset_parameter
+
+exe_adaptation()
 init_reset_parameter()

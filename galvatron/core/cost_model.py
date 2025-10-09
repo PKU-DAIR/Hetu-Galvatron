@@ -27,7 +27,8 @@ class MemoryCostModel:
             gpu_num = 8,
             chunks=None,
             async_grad_reduce=True,
-            sequence_parallel=True):
+            sequence_parallel=True,
+            vsp=0):
         assert mbsz > -1
         assert min_tp > -1
         self.strategy = strategy
@@ -107,13 +108,18 @@ class MemoryCostModel:
             other_layers_bsz = global_batch_size * tp /self.tp_size/self.dp_size
             
             # print(self.tp_size, self.dp_size, tp)
-            other_ms_zero2_ratio = zero3_ratio(self.tp_size*self.dp_size//tp) if use_zero3_for_embed else (zero2_ratio(self.tp_size*self.dp_size//tp) if use_zero2_for_dp else 1.0)
+            if vsp:
+                model_tp = 1
+                other_ms_zero2_ratio = zero3_ratio(self.tp_size*self.dp_size) if use_zero3_for_embed else (zero2_ratio(self.tp_size*self.dp_size) if use_zero2_for_dp else 1.0)
+            else:
+                model_tp = tp
+                other_ms_zero2_ratio = zero3_ratio(self.tp_size*self.dp_size//tp) if use_zero3_for_embed else (zero2_ratio(self.tp_size*self.dp_size//tp) if use_zero2_for_dp else 1.0)
             
             model_type = 'gpt' if model_type not in ['bert', 't5', 'vit', 'swin', 'gpt'] else model_type
             
             # print(other_memory_pp_off['model_states'])
             if self.pp_size == 1:
-                tp_other_memcosts[0] += other_memory_pp_off['model_states'][tp] * other_ms_zero2_ratio + other_memory_pp_off['activation'][tp] * other_layers_bsz * act_1f1b_ratio
+                tp_other_memcosts[0] += other_memory_pp_off['model_states'][model_tp] * other_ms_zero2_ratio + other_memory_pp_off['activation'][tp] * other_layers_bsz * act_1f1b_ratio
             else:
                 if pipeline_type == 'pipedream_flush':
                     other_layers_bsz_first = other_layers_bsz * act_1f1b_ratio_first
@@ -122,9 +128,9 @@ class MemoryCostModel:
                     other_layers_bsz_first = other_layers_bsz_last = other_layers_bsz
                 # Model type may affect other memory performance (embedding, cls, etc.)
                 if model_type in ['bert', 't5']:
-                    tp_other_memcosts[0] += other_memory_pp_on['first_stage']['model_states'][tp] * other_ms_zero2_ratio + other_memory_pp_on['first_stage']['activation'][tp] * (other_layers_bsz_first/self.pp_size)
+                    tp_other_memcosts[0] += other_memory_pp_on['first_stage']['model_states'][model_tp] * other_ms_zero2_ratio + other_memory_pp_on['first_stage']['activation'][tp] * (other_layers_bsz_first/self.pp_size)
                 elif model_type in ['vit', 'swin', 'gpt']:
-                    tp_other_memcosts[0] += other_memory_pp_on['first_stage']['model_states'][tp] * other_ms_zero2_ratio + other_memory_pp_on['first_stage']['activation'][tp] * other_layers_bsz_first
+                    tp_other_memcosts[0] += other_memory_pp_on['first_stage']['model_states'][model_tp] * other_ms_zero2_ratio + other_memory_pp_on['first_stage']['activation'][tp] * other_layers_bsz_first
                     # When chunks get larger, peak memory may reduce. Adjust peak memory if needed.
                     if peak_reduction_with_chunks is not None: 
                         if isinstance(peak_reduction_with_chunks, dict):
@@ -132,9 +138,9 @@ class MemoryCostModel:
                         else:
                             tp_other_memcosts[0] -= peak_reduction_with_chunks * other_layers_bsz_first * (1 - 1 / chunks)
                 if model_type in ['swin']:
-                    tp_other_memcosts[-1] += other_memory_pp_on['last_stage']['model_states'][tp] * other_ms_zero2_ratio + other_memory_pp_on['last_stage']['activation'][tp] * (other_layers_bsz_last/self.pp_size)
+                    tp_other_memcosts[-1] += other_memory_pp_on['last_stage']['model_states'][model_tp] * other_ms_zero2_ratio + other_memory_pp_on['last_stage']['activation'][tp] * (other_layers_bsz_last/self.pp_size)
                 elif model_type in ['bert', 't5', 'vit', 'gpt']:
-                    tp_other_memcosts[-1] += other_memory_pp_on['last_stage']['model_states'][tp] * other_ms_zero2_ratio + other_memory_pp_on['last_stage']['activation'][tp] * other_layers_bsz_last
+                    tp_other_memcosts[-1] += other_memory_pp_on['last_stage']['model_states'][model_tp] * other_ms_zero2_ratio + other_memory_pp_on['last_stage']['activation'][tp] * other_layers_bsz_last
                     # When chunks get larger, peak memory may reduce. Adjust peak memory if needed.
                     if peak_reduction_with_chunks is not None: 
                         if isinstance(peak_reduction_with_chunks, dict):
@@ -277,7 +283,7 @@ class TimeCostModel:
         self.dp_message_size = (2*(self.dp_size-1)/self.dp_size*self.parameter_size) * self.layer_num
         
         if self.sp_space == 'tp+sp':
-            self.per_tp_message_size = self.bs*self.sl*self.hs * (4 if mixed_precision else 2)
+            self.per_tp_message_size = self.bs*self.sl*self.hs * (2 if mixed_precision else 4)
             self.tp_comm_num = 4 if layer_type=='enc' else 6
             self.tp_comm_num *= self.layer_num
 
@@ -473,7 +479,7 @@ class OtherTimeCostModel:
         while k <= max_tp and world_size // pp_deg >= k:
             if self.vsp == 0:
                 if sp_space == 'tp+sp':
-                    self.per_tp_message_size = self.mbsz*self.sl*self.hs * (4 if mixed_precision else 2)
+                    self.per_tp_message_size = self.mbsz*self.sl*self.hs * (2 if mixed_precision else 4)
                     if k == 1:
                         self.per_tp_message_time = 0
                     else:
@@ -490,7 +496,7 @@ class OtherTimeCostModel:
                     else:
                         tp_coe = self.comm_coe_dict['%d_0'%k]
 
-                    self.tp_message_size = (k-1)/k*(self.mbsz*self.sl*self.hs/1024/1024) * (4 if mixed_precision else 2)
+                    self.tp_message_size = (k-1)/k*(self.mbsz*self.sl*self.hs/1024/1024) * (2 if mixed_precision else 4)
                     self.per_tp_message_time = self.tp_message_size * tp_coe
             else:
                 self.per_tp_message_time = 0

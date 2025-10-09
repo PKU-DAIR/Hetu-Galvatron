@@ -9,8 +9,8 @@ if __name__ == '__main__':
     profiler.set_path(path)
     
     # profile allreduce & p2p bandwidth
-    profiler.profile_bandwidth()
+    profiler.profile_bandwidth(backend = "pytorch")
     # profile allreduce & a2a bandwidth in different communication size
-    profiler.profile_sp_bandwidth()
+    profiler.profile_sp_bandwidth(backend = "pytorch")
     # profile overlapping slowdown coefficient
     profiler.profile_overlap()
