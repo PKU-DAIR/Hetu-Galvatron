@@ -10,6 +10,7 @@ from megatron.legacy.model.rms_norm import RMSNorm as LlamaRMSNorm
 from galvatron.core.tensor_parallel import colummn_row_reset_parameters
 from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
+from mindspeed.model.transformer import get_attention_mask
 
 def get_ltor_masks_and_position_ids(data):
     """Build masks and position id for left to right model."""
@@ -70,7 +71,11 @@ class LlamaLayers_(nn.Module):
         self.layer = model.layers[layer_idx]
 
     def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None):
+        if attention_mask == None:
+            attention_mask = get_attention_mask()
         # attention_mask = get_ltor_masks_and_position_ids(input_ids)
+        # if torch.cuda.current_device() == 0:
+        #     print(hidden_states)
         hidden_states = self.layer(hidden_states, attention_mask = attention_mask) # , position_ids = position_ids)
         return hidden_states
 
@@ -108,7 +113,7 @@ class LlamaLoss_(nn.Module):
 
 
 class LlamaCls_(nn.Module):
-    def __init__(self, model, parallel_loss = True, half_entorpy = True):
+    def __init__(self, model, parallel_loss = True, half_entropy = True):
         super().__init__()
         self.sequence_parallel = get_args().sequence_parallel
         self.tp_group = model.lm_head.tp_group
@@ -116,8 +121,10 @@ class LlamaCls_(nn.Module):
         self.lm_head = LlamaLoss_(model.lm_head.weight, self.sequence_parallel, self.tp_group)
         self.clone_scatter_output_in_embedding = get_args().clone_scatter_output_in_embedding
         self.parallel_loss = parallel_loss
-        self.half_entorpy = half_entorpy
+        self.half_entropy = half_entropy
         args = get_args()
+        if args.entropy_in_fp32:
+            self.half_entropy = False
         self.seq_length = args.seq_length
         self.vocab_sp = args.vocab_sp
         if self.vocab_sp:
@@ -139,7 +146,7 @@ class LlamaCls_(nn.Module):
         # loss = tensor_parallel.vocab_parallel_cross_entropy(output.float(), input_ids)
         if not self.parallel_loss:
             output = tensor_parallel.gather_from_tensor_model_parallel_region_group(logits_parallel, self.tp_group)
-            if not self.half_entorpy:
+            if not self.half_entropy:
                 logits = output.float()
             else:
                 logits = output
@@ -156,7 +163,7 @@ class LlamaCls_(nn.Module):
             shift_labels = shift_labels.to(shift_logits.device)
             loss = loss_fct(shift_logits, shift_labels)
         else:
-            if not self.half_entorpy:
+            if not self.half_entropy:
                 loss = tensor_parallel.vocab_parallel_cross_entropy(logits_parallel.float(), labels, tp_group = self.tp_group)
             else:
                 loss = tensor_parallel.vocab_parallel_cross_entropy(logits_parallel, labels, tp_group = self.tp_group)

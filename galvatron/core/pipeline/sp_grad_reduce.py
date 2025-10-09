@@ -98,7 +98,7 @@ def _post_backward_hook_sp(
             ):
                 flat_param.grad.data = flat_param.grad.to(handle._reduce_dtype)
             
-            if hasattr(state, "sp_group") and hasattr(state, "ln_offset") and len(state.ln_offset) > 0 and len(state.sp_group.ranks) > 1:
+            if hasattr(state, "sp_group") and hasattr(state, "ln_offset") and len(state.ln_offset) > 0 and len(state.sp_group.ranks) > 1 and hasattr(state, "last_batch") and state.last_batch:
                 all_ln_data = parallel_state.get_global_memory_buffer().get_tensor([sum(state.ln_size)],flat_param.grad.data.dtype,"reduce_grad")
                 idx = 0
                 for offset, size in zip(state.ln_offset, state.ln_size):

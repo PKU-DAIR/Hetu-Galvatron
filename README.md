@@ -1,3 +1,34 @@
+# Galvatron-Ascend
+
+## Overview
+
+Galvatron-Ascend is the Ascend AI processor adaptation of Galvatron, an automatic distributed training system for Transformer models and Large Language Models (LLMs). It seamlessly integrates Galvatron with Huawei Ascend AI processors, enabling efficient automated distributed training solutions on the Ascend platform.
+
+## Prerequisites
+
+* Hardware: Ascend 910B series
+* OS: Linux
+* Software:
+    * Python == 3.9.10
+    * CANN == 8.0.RC1
+    * PyTorch == 2.1.0 
+    * torch-npu == 2.1.0.post3-20240413
+    * MindSpeed (commit: 2b0edd2)
+
+## Getting Started
+
+Please refer to [Usage](#usage) for more details.
+
+## Contributors
+
+This project is jointly maintained and developed by **Peking University DAIR Lab** and **Huawei GTS (Global Technical Service)**.
+
+We appreciate the collaborative efforts from both teams in making efficient distributed training accessible on the Ascend AI computing platform.
+
+
+Below is Galvatron's original README.
+---
+
 # Galvatron-2
 
 Galvatron is an automatic distributed training system designed for Transformer models, including Large Language Models (LLMs). It leverages advanced automatic parallelism techniques to deliver exceptional training efficiency. This repository houses the official implementation of Galvatron-2, our latest version enriched with several new features.
@@ -70,9 +101,12 @@ sh scripts/profile_hardware.sh
 
 Galvatron will call [nccl-tests](https://github.com/NVIDIA/nccl-tests) to profile the communication bandwidth.
 
-(2) Secondly, to profile the model computation time, ```cd galvatron/models/model_name``` and run:
+For Ascend platform, the script will not directly profile the bandwidth, but will generate four scripts, `profile_allreduce`, `profile_p2p`, `profile_allreduce_sp`, `profile_all2all_sp`. Users need to run these scripts on all nodes one by one to get the bandwidth of different communication modes.
+
+(2) Secondly, to profile the model computation time and memory usage, ```cd galvatron/models/model_name``` and run:
 ``` shell
 sh scripts/profile_computation.sh
+sh scripts/profile_memory.sh
 ```
 
 ### Parallelism Optimizing with Galvatron
@@ -95,3 +129,4 @@ sh scripts/train_dist.sh
 ```
 
 See detailed guidance and more customized training options in [Galvatron Model Usage](galvatron/models/README.md#training-with-galvatron).
+

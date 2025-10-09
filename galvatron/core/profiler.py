@@ -176,7 +176,7 @@ class GalvatronProfiler():
                 torch.cuda.synchronize()
                 self.start.record()
             
-    def profile_time_end(self, iter, loss = None, learning_rate = None):
+    def profile_time_end(self, iter, loss = None, learning_rate = None, grad_norm = None):
         if not self.args.profile:
             return
         if iter >= self.start_iter and iter < self.end_iter:
@@ -192,14 +192,16 @@ class GalvatronProfiler():
                     log_parts = []
                     log_parts.append("| Iteration: {:6d} | Consumed samples: {:12d} | ")
                     log_parts.append("Elapsed time per iteration (ms): {:.1f} | ")
-                    log_parts.append("Learning rate: {:.6e} | Loss: {:.6e} |")
+                    log_parts.append("Learning rate: {:.6e} | Loss: {:.6e} | ")
+                    log_parts.append("grad norm: {:.2f} |")
                     message = ''.join(log_parts)
                     print(message.format(
                         iter + 1,
                         (iter + 1) * self.args.global_train_batch_size,
                         iter_time * 1e3,
                         self.args.lr if learning_rate is None else learning_rate,
-                        loss.item()
+                        loss.item(),
+                        grad_norm
                     ))
     
     def profile_time_python(self, iter):
@@ -581,9 +583,102 @@ class GalvatronProfiler():
             write_json_config(config, memory_config_path)
 
     # =============== For Launching Nccl-test for Hardware Profiling ===============
-    def profile_bandwidth(self):
+    def generate_script(self, num_nodes, num_gpus_per_node, node_rank, master_addr, master_port):
+        world_size = num_nodes * num_gpus_per_node
+        env = "export HCCL_CONNECT_TIMEOUT=3600 \n\
+export HCCL_EXEC_TIMEOUT=7200 \n\
+export HCCL_ASYNC_ERROR_HANDLING=3600 \n\
+export NUM_NODES=$MA_NUM_HOSTS \n\
+export NUM_GPUS_PER_NODE=%d \n\
+MASTER_HOST=${MA_VJ_NAME}-${MA_TASK_NAME}-0.${MA_VJ_NAME}:1234 \n\
+export MASTER_ADDR=${MASTER_HOST%%%%:*} \n\
+export MASTER_PORT=${MASTER_HOST##*:} \n\
+export NODE_RANK=$VC_TASK_INDEX \n\
+export PYTHONPATH=$PYTHONPATH:/${MA_JOB_DIR}/runtime/Galvatron-ascend-2.4 \n"%num_gpus_per_node
+        def allreduce_script(allreduce_size, allreduce_consec):
+            return "python -m torch.distributed.launch --nnodes=$NUM_NODES --nproc_per_node=$NUM_GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT --node_rank=$NODE_RANK profile_allreduce.py --global_tp_deg %d --global_tp_consec %d --pp_deg 1 --nproc_per_node=$NUM_GPUS_PER_NODE \n"%(allreduce_size,allreduce_consec)
+        
+        with open('scripts/profile_allreduce.sh', 'w') as f:
+            f.write(env)
+            allreduce_size = num_nodes * num_gpus_per_node
+            while allreduce_size > 1:
+                for allreduce_consec in [1, 0]:
+                    if world_size == allreduce_size and allreduce_consec == 0:
+                        continue
+                    f.write("echo \"Running: %s\"\n"%allreduce_script(allreduce_size, allreduce_consec))
+                    f.write(allreduce_script(allreduce_size, allreduce_consec))
+                allreduce_size /= 2
+                f.write('sleep 1\n')
+        
+        args = self.args
+        def p2p_script(pp_deg):
+            return "python -m torch.distributed.launch --nnodes=$NUM_NODES --nproc_per_node=$NUM_GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT --node_rank=$NODE_RANK profile_p2p.py --global_tp_deg 1 --global_tp_consec 1 --pp_deg %d --nproc_per_node=$NUM_GPUS_PER_NODE \n"%(pp_deg)
+        
+        with open('scripts/profile_p2p.sh', 'w') as f:
+            f.write(env)
+            pp_deg = 2
+            while pp_deg <= world_size and pp_deg <= args.max_pp_deg:
+                f.write("echo \"Running: %s\"\n"%p2p_script(pp_deg))
+                f.write(p2p_script(pp_deg))
+                pp_deg *= 2
+                f.write('sleep 1\n')
+
+    def generate_sp_script(self, num_nodes, num_gpus_per_node, node_rank, master_addr, master_port):
+        world_size = num_nodes * num_gpus_per_node
+        env = "export HCCL_CONNECT_TIMEOUT=3600 \n\
+export HCCL_EXEC_TIMEOUT=7200 \n\
+export HCCL_ASYNC_ERROR_HANDLING=3600 \n\
+export NUM_NODES=$MA_NUM_HOSTS \n\
+export NUM_GPUS_PER_NODE=%d \n\
+MASTER_HOST=${MA_VJ_NAME}-${MA_TASK_NAME}-0.${MA_VJ_NAME}:1234 \n\
+export MASTER_ADDR=${MASTER_HOST%%%%:*} \n\
+export MASTER_PORT=${MASTER_HOST##*:} \n\
+export NODE_RANK=$VC_TASK_INDEX \n\
+export PYTHONPATH=$PYTHONPATH:/${MA_JOB_DIR}/runtime/Galvatron-ascend-2.4 \n"%num_gpus_per_node
+        def allreduce_script(allreduce_size, allreduce_consec, buffer_size):
+            return "python -m torch.distributed.launch --nnodes=$NUM_NODES --nproc_per_node=$NUM_GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT --node_rank=$NODE_RANK profile_allreduce.py --global_tp_deg %d --global_tp_consec %d --pp_deg 1 --nproc_per_node=$NUM_GPUS_PER_NODE --local_batch_size %d --profile_time 1\n"%(allreduce_size,allreduce_consec,buffer_size)
+        
+        with open('scripts/profile_allreduce_sp.sh', 'w') as f:
+            f.write(env)
+            allreduce_size = 8
+            while allreduce_size > 1:
+                buffer_size = 1024
+                while buffer_size >= 1:
+                    f.write("echo \"Running: %s\"\n"%allreduce_script(allreduce_size, 1, buffer_size))
+                    f.write(allreduce_script(allreduce_size, 1, buffer_size))
+                    f.write('sleep 1\n')
+                    buffer_size /= 2
+                allreduce_size /= 2
+        
+        args = self.args
+        def all2all_script(allreduce_size, allreduce_consec, buffer_size):
+            return "python -m torch.distributed.launch --nnodes=$NUM_NODES --nproc_per_node=$NUM_GPUS_PER_NODE --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT --node_rank=$NODE_RANK profile_all2all.py --global_tp_deg %d --global_tp_consec %d --pp_deg 1 --nproc_per_node=$NUM_GPUS_PER_NODE --local_batch_size %d --profile_time 1\n"%(allreduce_size,allreduce_consec,buffer_size)
+        
+        with open('scripts/profile_all2all_sp.sh', 'w') as f:
+            f.write(env)
+            all2all_size = 8
+            while all2all_size > 1:
+                buffer_size = 1024
+                while buffer_size >= 1:
+                    f.write("echo \"Running: %s\"\n"%all2all_script(all2all_size, 1, buffer_size))
+                    f.write(all2all_script(all2all_size, 1, buffer_size))
+                    f.write('sleep 1\n')
+                    buffer_size /= 2
+                all2all_size /= 2
+                
+        
+
+    def profile_bandwidth(self, backend = "nccl"):
         args = self.args
         world_size = args.num_nodes * args.num_gpus_per_node
+        if backend != "nccl":
+            self.generate_script(args.num_nodes, args.num_gpus_per_node, args.node_rank, args.master_addr, args.master_port)
+            # import os
+            # os.system('sh allreduce_scrpit.sh')
+            # os.system('sh p2p_scrpit.sh')
+            return
+
+        import os
         hardware_config_dir = os.path.join(self.path, './hardware_configs')
         if not os.path.exists(hardware_config_dir):
             os.mkdir(hardware_config_dir)
@@ -621,7 +716,15 @@ class GalvatronProfiler():
             
         os.system('rm -rf %s'%(os.path.join(self.path, 'nccl_test.log')))
     
-    def profile_sp_bandwidth(self):
+    def profile_sp_bandwidth(self, backend = "nccl"):
+        args = self.args
+        world_size = args.num_nodes * args.num_gpus_per_node
+        if backend != "nccl":
+            self.generate_sp_script(args.num_nodes, args.num_gpus_per_node, args.node_rank, args.master_addr, args.master_port)
+            # import os
+            # os.system('sh allreduce_scrpit.sh')
+            # os.system('sh p2p_scrpit.sh')
+            return
         args = self.args
         world_size = args.num_nodes * args.num_gpus_per_node
         hardware_config_dir = os.path.join(self.path, './hardware_configs')
@@ -867,11 +970,14 @@ class GalvatronProfiler():
                             'kv_channels',
                             'make_vocab_size_divisible_by',
                             'padded_vocab_size',
-                            'ffn_hidden_size',
-                            'group_query_attention',
-                            'num_query_groups',
                             'add_bias_linear',
                             'swiglu',
+                            'ffn_hidden_size',
+                            'use_fused_rmsnorm',
+                            'use_fused_rotary_pos_emb',
+                            'use_fused_swiglu',
+                            'group_query_attention',
+                            'num_query_groups',
                             'extra_args_str',
                             "seq_length"]
         exclude_arg_names = profile_arg_names+self.layernum_arg_names
@@ -957,6 +1063,16 @@ class GalvatronProfiler():
             args['use-flash-attn'] = ''
         if self.args.sequence_parallel:
             args['sequence-parallel'] = ''
+        if self.args.use_fused_rmsnorm:
+            args['use-fused-rmsnorm'] = ''
+            args['normalization'] = 'RMSNorm'
+        if self.args.use_fused_rotary_pos_emb:
+            args['use-fused-rotary-pos-emb'] = ''
+            args['position-embedding-type'] = 'rope'
+        if self.args.use_fused_swiglu:
+            args['use-fused-swiglu'] = ''
+            args['swiglu'] = ''
+
         return args
     
     def get_layernum_args(self, layernum_list):

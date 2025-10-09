@@ -34,7 +34,11 @@ def convert_checkpoints_llama(input_checkpoint_path, output_dir):
     for filename in os.listdir(input_checkpoint_path):
         if filename.endswith('.bin'):
             file_path = os.path.join(input_checkpoint_path, filename)
-            checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
+            try:
+                checkpoint = torch.load(file_path, mmap=True, map_location='cpu')
+            except Exception as e:
+                print(f"Waring: Cant read file {file_path}: {e}")
+                continue
             layer_params = defaultdict(dict)
             for key, value in checkpoint.items():
                 if len(key.split('.')) > 3:
@@ -56,7 +60,16 @@ def convert_checkpoints_llama(input_checkpoint_path, output_dir):
 
             for layer_name, params in layer_params.items():
                 layer_file = os.path.join(output_dir, f"{layer_name.replace('.', '_')}.pt")
-                torch.save(params, layer_file)
+                if os.path.exists(layer_file):
+                    existing_params = torch.load(layer_file)
+                    for key in params:
+                        if key in existing_params:
+                            existing_params[key] += params[key]
+                        else:
+                            existing_params[key] = params[key]
+                else:
+                    existing_params = params
+                torch.save(existing_params, layer_file)
                 print(f"Saved parameters for {layer_name} to {layer_file}")
 
 def main():

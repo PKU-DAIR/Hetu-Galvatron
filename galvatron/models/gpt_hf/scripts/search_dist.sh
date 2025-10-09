@@ -1,8 +1,8 @@
-export NUM_NODES=1
+export NUM_NODES=2
 export NUM_GPUS_PER_NODE=8
 
 MODEL_SIZE="gpt-6.7b"
-MEMORY=34
+MEMORY=40
 
 MODEL_ARGS="
     --model_size ${MODEL_SIZE} \

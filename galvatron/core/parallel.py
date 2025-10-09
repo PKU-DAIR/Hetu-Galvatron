@@ -71,15 +71,16 @@ def wrap_module_fsdp_manually(module, pp_device, module_type='bert_enc', dp_grou
     sharding_strategy = {'ddp': ShardingStrategy.NO_SHARD,
                            'zero2': ShardingStrategy.SHARD_GRAD_OP,
                            'zero3': ShardingStrategy.FULL_SHARD}[fsdp_type]
+    from .arguments import get_args
+    args = get_args()
+    
     mixed_precision_policy = MixedPrecision(
         param_dtype=mixed_precision, # Param precision
-        reduce_dtype=mixed_precision, # Gradient communication precision
+        reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision, # Gradient communication precision
         buffer_dtype=mixed_precision, # Buffer precision
         cast_forward_inputs=True,
         cast_root_forward_inputs=True,
     )
-    from .arguments import get_args
-    args = get_args()
     backward_prefetch = None if pp_on else BackwardPrefetch.BACKWARD_PRE
     fsdp_args = dict(process_group = comm_group, 
                     sharding_strategy = sharding_strategy, 
@@ -253,7 +254,7 @@ def wrap_modules_data_parallel(module_list, dp_types, dp_groups, module_types, p
                            'zero3': ShardingStrategy.FULL_SHARD}[args.default_dp_type]
     mixed_precision_policy = MixedPrecision(
         param_dtype=mixed_precision, # Param precision
-        reduce_dtype=mixed_precision, # Gradient communication precision
+        reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision, # Gradient communication precision
         buffer_dtype=mixed_precision, # Buffer precision
         cast_forward_inputs=True,
         cast_root_forward_inputs=True
@@ -276,7 +277,7 @@ def wrap_model_data_parallel(model, device, wrap_block_names=[], dp_type='ddp', 
                            'zero3': ShardingStrategy.FULL_SHARD}[dp_type]
     mixed_precision_policy = MixedPrecision(
         param_dtype=mixed_precision, # Param precision
-        reduce_dtype=mixed_precision, # Gradient communication precision
+        reduce_dtype=torch.float if args.reduce_in_fp32 else mixed_precision, # Gradient communication precision
         buffer_dtype=mixed_precision, # Buffer precision
         cast_forward_inputs=True,
         cast_root_forward_inputs=True,

@@ -3,7 +3,7 @@ def model_args(parser):
     group = parser.add_argument_group(title='Model Arguments')
 
     group.add_argument(
-        "--model_size", type=str, default='llama-7b', help="Model size.", choices=['llama-0.3b', 'llama-7b', 'llama-13b', 'llama-30b', 'llama2-70b']
+        "--model_size", type=str, default='llama-7b', help="Model size.", choices=['llama-0.3b', 'llama-7b', 'llama-13b', 'llama-30b', 'llama2-70b', 'qwen2.5-72b']
     )
     group.add_argument(
         "--hidden_size", type=int, default=768, help="Hidden size of transformer model",

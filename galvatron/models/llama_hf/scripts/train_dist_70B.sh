@@ -33,10 +33,8 @@ TRAINER="train_dist.py"
 DATA_PATH="/home/ma-user/modelarts/inputs/data_path_0/alpaca_text_document"
 TOKENIZER_MODEL="/home/ma-user/modelarts/inputs/data_path_0/tokenizer.model"
 
-# echo "${data_path}"
-
 MODEL_ARGS="
-    --model_size llama-7b \
+    --model_size llama2-70b \
     --set_model_config_manually 0 \
     --set_layernum_manually 0 \
     --set_seqlen_manually 1 \
@@ -44,26 +42,17 @@ MODEL_ARGS="
     --hidden_size 4096 \
     --num_hidden_layers 20 \
     --num_attention_heads 32 \
-    --seq_length 2048"
+    --seq_length 98304"
 
 TRAIN_ARGS="
     --global_train_batch_size 32 \
     --train-iters 20 \
     --eval-iters 1 \
-    --lr 1.25e-6 \
-    --lr-decay-style cosine \
-    --min-lr 1.25e-7 \
-    --lr-warmup-fraction 0.1 \
-    --weight-decay 0.1 \
-    --adam-beta1 0.9 \
-    --adam-beta2 0.95 \
-    --adam-eps 1.0e-5 \
-    --init-method-std 0.01 \
+    --lr 1e-6 \
     --adam_weight_decay 0.01 \
     --dropout_prob 0.1 \
     --check_loss 0 \
     --profile 1 \
-    --no_async_grad_reduce \
     --save_profiled_memory 0"
 
 DATA_ARGS="
@@ -73,17 +62,13 @@ DATA_ARGS="
     --tokenizer-model ${TOKENIZER_MODEL}
 "
 
-# CKPT_ARGS="
-#     --load /opt/dpcvol/models/lxy/llama2-7b-chat-hf-split
-# "
-
 PARALLEL_ARGS="
     --pp_deg 1 \
-    --global_tp_deg 8 \
+    --global_tp_deg 16 \
     --global_tp_consec 1 \
     --sdp 1 \
     --global_checkpoint 1 \
-    --vocab_tp 8 \
+    --vocab_tp 16 \
     --chunks 2 \
     --pipeline_type pipedream_flush \
     --default_dp_type zero2 \
@@ -96,7 +81,8 @@ PARALLEL_ARGS="
     --swiglu \
     --sequence-parallel \
     --use-flash-attn \
-    --initialize_on_meta 1" #  \
-    # --galvatron_config_path ./configs/galvatron_config_hidden8192_head64_seqlen4096_16nodes_8gpus_per_node_28GB_bf16_bsz128_[sdp_tpconsec_off].json"
+    --no-create-attention-mask-in-dataloader \
+    --initialize_on_meta 1" 
+    # --galvatron_config_path ./configs/galvatron_config_hidden8192_head64_seqlen4096_16nodes_8gpus_per_node_28GB_bf16_bsz128_[tpconsec_off]_80.json"
 
 ${LAUNCHER} ${TRAINER} ${MODEL_ARGS} ${TRAIN_ARGS} ${PARALLEL_ARGS} ${DATA_ARGS}
