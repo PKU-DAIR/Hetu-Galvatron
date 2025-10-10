@@ -75,6 +75,8 @@ def read_allreduce_bandwidth_config(config_path, gpu_num):
         comm_coe_dict['%d_0'%max_dp]=1.0/bandwidth_dict['%d_0'%max_dp]
         bandwidth_dict['%d_1'%max_dp]=env_config['allreduce_size_%d_consec_1'%(max_dp)]
         comm_coe_dict['%d_1'%max_dp]=1.0/bandwidth_dict['%d_1'%max_dp]
+        bandwidth_dict['%d'%max_dp] = bandwidth_dict['%d_1'%max_dp]
+        comm_coe_dict['%d'%max_dp] = comm_coe_dict['%d_1'%max_dp]
         max_dp = max_dp // 2
     bandwidth_dict['1']=np.inf
     comm_coe_dict['1']=0

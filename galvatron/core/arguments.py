@@ -4,6 +4,7 @@ import argparse
 from .profiler import galvatron_profile_args, galvatron_profile_hardware_args
 from .runtime.arguments import galvatron_training_args
 from .search_engine.arguments import galvatron_search_args
+from .cost_model.arguments import galvatron_cost_model_args
 
 def initialize_galvatron(model_args = None, mode="train_dist"):
     use_megatron = False
@@ -16,6 +17,8 @@ def initialize_galvatron(model_args = None, mode="train_dist"):
         extra_args_provider = [galvatron_search_args]
     elif mode == "profile_hardware":
         extra_args_provider = [galvatron_profile_hardware_args]
+    elif mode == "cost_model":
+        extra_args_provider = [galvatron_cost_model_args]
     if model_args is not None:
         extra_args_provider.append(model_args)
     if use_megatron:
