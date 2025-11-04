@@ -91,8 +91,7 @@ class DotProductAttention(MegatronModule):
         self.hidden_size_per_partition = divide(projection_size, world_size)
         self.hidden_size_per_attention_head = divide(projection_size, config.num_attention_heads)
         self.num_attention_heads_per_partition = divide(self.config.num_attention_heads, world_size)
-        self.num_query_groups_per_partition = divide(self.config.num_query_groups, world_size)
-
+        #self.num_query_groups_per_partition = divide(self.config.num_query_groups, world_size)
         coeff = None
         if softmax_scale is None:
             self.softmax_scale = 1.0 / math.sqrt(self.hidden_size_per_attention_head)
@@ -147,12 +146,18 @@ class DotProductAttention(MegatronModule):
         # match the number of queries.
 
         # attn_mask_type is not used.
-        if self.num_attention_heads_per_partition // self.num_query_groups_per_partition > 1:
+
+        # For Ulysses SP：To accommodate the case of num_query_groups < sp_world_size, 
+        # we expand the group dimension of the key and value under GQA 
+        # from the original shape [sk, b, ng, hn] to [sk, b, sp_world_size, hn].
+        new_num_query_groups_per_partition = key.shape[2]
+        assert self.num_attention_heads_per_partition % new_num_query_groups_per_partition == 0, "self.num_attention_heads_per_partition % new_num_query_groups_per_partition != 0"
+        if self.num_attention_heads_per_partition // new_num_query_groups_per_partition > 1:
             key = key.repeat_interleave(
-                self.num_attention_heads_per_partition // self.num_query_groups_per_partition, dim=2
+                self.num_attention_heads_per_partition // new_num_query_groups_per_partition, dim=2
             )
             value = value.repeat_interleave(
-                self.num_attention_heads_per_partition // self.num_query_groups_per_partition, dim=2
+                self.num_attention_heads_per_partition // new_num_query_groups_per_partition, dim=2
             )
 
         # [b, np, sq, sk]
@@ -531,7 +536,20 @@ class DistributedAttention(torch.nn.Module):
         # TODO Merge three alltoall calls into one
         # TODO (Reza): change the api on the megatron-deepspeed side so that we only receive all data (q,k, and v) together!
         # in shape : e.g.,  [s/p:h:]
-
+        num_query_groups = key.shape[2]
+        sp_world_size = torch.distributed.get_world_size(self.spg)
+        if num_query_groups >= sp_world_size:
+            assert num_query_groups % sp_world_size == 0, "num_query_groups % sp_world_size != 0"
+        else:
+            assert sp_world_size % num_query_groups == 0, "sp_world_size % num_query_groups != 0"
+        if num_query_groups < sp_world_size:
+            key = key.repeat_interleave(
+                sp_world_size // num_query_groups, dim=2
+            )
+            value = value.repeat_interleave(
+                sp_world_size // num_query_groups, dim=2
+            )
+            
         def bwd_hook(layer_type):
 
             def pre_hook_fun(grad):
