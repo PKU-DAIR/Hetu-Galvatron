@@ -24,6 +24,7 @@ def _tiled_max_kernel(
     vocab_size,
     # Block size
     BLOCK_SIZE: tl.constexpr,
+    num_stages: tl.constexpr,
 ):
     """
     Tile-wise max reduction: avoid creating full fp32 tensor
@@ -45,8 +46,8 @@ def _tiled_max_kernel(
     # Initialize max to -inf
     max_val = float('-inf')
     
-    # Tile-wise processing over vocab dimension
-    for vocab_offset in range(0, vocab_size, BLOCK_SIZE):
+    # Tile-wise processing over vocab dimension with software pipelining
+    for vocab_offset in tl.range(0, vocab_size, BLOCK_SIZE, num_stages=num_stages):
         # Calculate current tile range
         vocab_indices = vocab_offset + tl.arange(0, BLOCK_SIZE)
         mask = vocab_indices < vocab_size
@@ -86,6 +87,7 @@ def _tiled_cross_entropy_forward_kernel(
     vocab_end_idx,
     # Block size
     BLOCK_SIZE: tl.constexpr,
+    num_stages: tl.constexpr,
 ):
     """
     Tile-wise forward kernel: compute statistics, avoid storing full fp32 exp_logits
@@ -113,8 +115,8 @@ def _tiled_cross_entropy_forward_kernel(
     sum_exp = 0.0
     predicted_logit = 0.0
     
-    # Tile-wise processing over vocab dimension
-    for vocab_offset in range(0, vocab_size, BLOCK_SIZE):
+    # Tile-wise processing over vocab dimension with software pipelining
+    for vocab_offset in tl.range(0, vocab_size, BLOCK_SIZE, num_stages=num_stages):
         # Calculate current tile range
         vocab_indices = vocab_offset + tl.arange(0, BLOCK_SIZE)
         mask = vocab_indices < vocab_size
@@ -163,6 +165,7 @@ def _tiled_cross_entropy_backward_kernel(
     vocab_end_idx,
     # Block size
     BLOCK_SIZE: tl.constexpr,
+    num_stages: tl.constexpr,
 ):
     """
     Tile-wise backward kernel: recompute exp and calculate gradients
@@ -186,8 +189,8 @@ def _tiled_cross_entropy_backward_kernel(
     sum_exp = tl.load(sum_exp_logits_ptr + token_offset)
     grad_out = tl.load(grad_output_ptr + token_offset)
     
-    # Tile-wise processing over vocab dimension
-    for vocab_offset in range(0, vocab_size, BLOCK_SIZE):
+    # Tile-wise processing over vocab dimension with software pipelining
+    for vocab_offset in tl.range(0, vocab_size, BLOCK_SIZE, num_stages=num_stages):
         vocab_indices = vocab_offset + tl.arange(0, BLOCK_SIZE)
         mask = vocab_indices < vocab_size
         
@@ -217,6 +220,8 @@ def _tiled_cross_entropy_backward_kernel(
 def tiled_max_reduction(
     vocab_parallel_logits: torch.Tensor,  # [S, B, V/TP] bf16
     BLOCK_SIZE: int = 1024,
+    num_stages: int = 2,
+    num_warps: int = 4,
 ) -> torch.Tensor:
     """
     Use Triton's tile-wise max reduction, avoid full fp32 tensor
@@ -224,10 +229,14 @@ def tiled_max_reduction(
     Key optimizations:
     - bf16 → fp32 conversion only happens in SRAM
     - Don't create full fp32 vocab_parallel_logits
+    - Software pipelining to hide memory latency
+    - Configurable warp count for better SM utilization
     
     Args:
         vocab_parallel_logits: bf16 [S, B, V/TP]
         BLOCK_SIZE: tile size for vocab dimension
+        num_stages: number of software pipelining stages
+        num_warps: number of warps per thread block (default 4)
     
     Returns:
         logits_max: fp32 [S, B]
@@ -248,6 +257,8 @@ def tiled_max_reduction(
         batch_size,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_stages=num_stages,
+        num_warps=num_warps,
     )
     
     return logits_max
@@ -260,9 +271,15 @@ def tiled_cross_entropy_forward(
     vocab_start_idx: int,
     vocab_end_idx: int,
     BLOCK_SIZE: int = 1024,
+    num_stages: int = 2,
+    num_warps: int = 4,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     Use Triton's tile-wise forward, avoid full fp32 tensor
+    
+    Args:
+        num_stages: number of software pipelining stages
+        num_warps: number of warps per thread block (default 4)
     
     Returns:
         predicted_logits: [S, B] fp32 - (logits[target] - max)
@@ -290,6 +307,8 @@ def tiled_cross_entropy_forward(
         vocab_start_idx,
         vocab_end_idx,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_stages=num_stages,
+        num_warps=num_warps,
     )
     
     return predicted_logits, sum_exp_logits
@@ -304,9 +323,15 @@ def tiled_cross_entropy_backward(
     vocab_start_idx: int,
     vocab_end_idx: int,
     BLOCK_SIZE: int = 1024,
+    num_stages: int = 2,
+    num_warps: int = 4,
 ) -> torch.Tensor:
     """
     Use Triton's tile-wise backward, recompute exp
+    
+    Args:
+        num_stages: number of software pipelining stages
+        num_warps: number of warps per thread block (default 4)
     
     Returns:
         grad_logits: [S, B, V/TP] bf16
@@ -333,6 +358,8 @@ def tiled_cross_entropy_backward(
         vocab_start_idx,
         vocab_end_idx,
         BLOCK_SIZE=BLOCK_SIZE,
+        num_stages=num_stages,
+        num_warps=num_warps,
     )
     
     return grad_logits
@@ -363,6 +390,8 @@ class _VocabParallelCrossEntropyTritonFused(torch.autograd.Function):
         logits_max = tiled_max_reduction(
             vocab_parallel_logits,  # bf16 [S, B, V/TP]
             BLOCK_SIZE=1024,
+            num_stages=2,  # Software pipelining to hide memory latency
+            num_warps=4,   # 4 warps for better SM utilization
         )  # Returns fp32 [S, B], but no fp32 peak during process!
         
         # Step 2: All-Reduce max
@@ -384,11 +413,14 @@ class _VocabParallelCrossEntropyTritonFused(torch.autograd.Function):
             vocab_start_index,
             vocab_end_index,
             BLOCK_SIZE=1024,
+            num_stages=2,
+            num_warps=4,
         )
         
         # Step 4: All-Reduce statistics (small data amount)
-        torch.distributed.all_reduce(predicted_logits, op=torch.distributed.ReduceOp.SUM, group=tp_group)
-        torch.distributed.all_reduce(sum_exp_logits, op=torch.distributed.ReduceOp.SUM, group=tp_group)
+        stats = torch.stack([predicted_logits, sum_exp_logits], dim=0)  # [2, S, B]
+        torch.distributed.all_reduce(stats, op=torch.distributed.ReduceOp.SUM, group=tp_group)
+        predicted_logits, sum_exp_logits = stats[0], stats[1]
         
         # Step 5: Calculate loss
         # predicted_logits = logits[target] - max
@@ -441,6 +473,8 @@ class _VocabParallelCrossEntropyTritonFused(torch.autograd.Function):
             vocab_start_index,
             vocab_end_index,
             BLOCK_SIZE=1024,
+            num_stages=2,
+            num_warps=4,
         )
         
         # grad_logits is already bf16, return directly
