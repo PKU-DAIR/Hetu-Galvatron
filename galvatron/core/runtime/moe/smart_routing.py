@@ -133,261 +133,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         }
         self.async_lp_task_id = None
         self.need_to_sync = False
-    
-    def get_smart_routing_map(self, num_global_tokens_per_expert: torch.Tensor, global_expert_indices: torch.Tensor) -> torch.Tensor:
-        """
-        Get the smart routing map.
-        num_global_tokens_per_expert: [tp_size, ep_size, num_global_experts]
-        global_expert_indices: [ep_size, num_local_experts]
-        output: [tp_size, ep_size, num_local_experts * ep_size]
-        """
-        tp_size, ep_size, num_global_experts = num_global_tokens_per_expert.shape
-        _, num_local_experts = global_expert_indices.shape
-        
-        # output tensor: [tp_size, ep_size, ep_size * num_local_experts]
-        # Each source rank sends how many tokens to each target rank's each local expert
-        new_num_global_tokens_per_expert = torch.zeros((tp_size, ep_size, ep_size * num_local_experts), 
-                                dtype=num_global_tokens_per_expert.dtype,
-                                device=torch.device("cpu"))
 
-        gpus_per_node = 8
-        
-        def get_node_id(rank):
-            return rank // gpus_per_node
-        
-        # TODO: move it to solver
-        expert_to_locations = {}  # expert_id -> [(rank, local_idx), ...]
-        expert_to_nodes = {}      # expert_id -> [node_id, ...]
-        node_to_experts = {}      # node_id -> set(expert_ids)
-
-        global_expert_indices_cpu = global_expert_indices.cpu()
-        num_global_tokens_per_expert_cpu = num_global_tokens_per_expert.cpu()
-        
-        for ep_rank in range(ep_size):
-            node_id = get_node_id(ep_rank)
-            if node_id not in node_to_experts:
-                node_to_experts[node_id] = set()
-                
-            for local_idx in range(num_local_experts):
-                expert_id = global_expert_indices_cpu[ep_rank, local_idx].item()
-
-                if expert_id not in expert_to_locations:
-                    expert_to_locations[expert_id] = []
-                    expert_to_nodes[expert_id] = set()
-                
-                expert_to_locations[expert_id].append((ep_rank, local_idx))
-                expert_to_nodes[expert_id].add(node_id)
-                node_to_experts[node_id].add(expert_id)
-
-        for mode in range(2):
-            for tp_idx in range(tp_size):
-                for src_ep_rank in range(ep_size):
-                    src_node = get_node_id(src_ep_rank)
-                    tokens_to_send = num_global_tokens_per_expert_cpu[tp_idx, src_ep_rank]  # [num_global_experts]
-                    for global_expert_id in range(num_global_experts):
-                        tokens_for_expert = tokens_to_send[global_expert_id].item()
-                        if tokens_for_expert == 0:
-                            continue
-                        if global_expert_id not in expert_to_locations:
-                            continue
-                        all_locations = expert_to_locations[global_expert_id]
-                        intra_node_locations = [(rank, local_idx) for rank, local_idx in all_locations 
-                                            if get_node_id(rank) == src_node]
-                        if mode == 0:
-                            if intra_node_locations:
-                                self._distribute_tokens_evenly(new_num_global_tokens_per_expert, tp_idx, src_ep_rank, 
-                                                            intra_node_locations, tokens_for_expert, num_local_experts)
-                        else:
-                            if not intra_node_locations:
-                                self._distribute_tokens_greedy(new_num_global_tokens_per_expert, tp_idx, src_ep_rank, 
-                                                            all_locations, tokens_for_expert, num_local_experts)
-        
-        return new_num_global_tokens_per_expert.to(num_global_tokens_per_expert.device)
-
-    def _distribute_tokens_evenly(self, new_num_global_tokens_per_expert, tp_idx, src_ep_rank, locations, total_tokens, num_local_experts):
-        """intra-node token average allocation"""
-        num_locations = len(locations)
-        tokens_per_location = total_tokens // num_locations
-        remaining_tokens = total_tokens % num_locations
-
-        for i, (target_rank, local_idx) in enumerate(locations):
-            target_idx = target_rank * num_local_experts + local_idx
-            tokens_to_assign = tokens_per_location
-            if i < remaining_tokens:
-                tokens_to_assign += 1
-            new_num_global_tokens_per_expert[tp_idx, src_ep_rank, target_idx] += tokens_to_assign
-
-    def _distribute_tokens_greedy(self, new_num_global_tokens_per_expert, tp_idx, src_ep_rank, locations, total_tokens, num_local_experts):
-        """node-to-node token greedy allocation - prioritize filling the location with the least load"""
-        if not locations:
-            return
-        num_locations = len(locations)
-
-        loads_and_indices = []
-        for target_rank, local_idx in locations:
-            target_idx = target_rank * num_local_experts + local_idx
-            current_load = new_num_global_tokens_per_expert[tp_idx, src_ep_rank, target_idx].item()
-            loads_and_indices.append((current_load, target_idx))
-        
-        loads_and_indices.sort(key=lambda x: x[0])
-        loads = [x[0] for x in loads_and_indices]
-        indices = [x[1] for x in loads_and_indices]
-        
-        tokens_to_distribute = [0] * num_locations
-        remaining = total_tokens
-        for i in range(num_locations):
-            if remaining <= 0:
-                break
-            current_level = loads[i]
-            next_level = loads[i + 1] if i + 1 < num_locations else current_level + remaining + 1
-            positions_to_fill = i + 1
-            tokens_needed = (next_level - current_level) * positions_to_fill
-            if tokens_needed <= remaining:
-                for j in range(positions_to_fill):
-                    tokens_to_distribute[j] += (next_level - current_level)
-                remaining -= tokens_needed
-            else:
-                tokens_per_position = remaining // positions_to_fill
-                extra_tokens = remaining % positions_to_fill
-                for j in range(positions_to_fill):
-                    tokens_to_distribute[j] += tokens_per_position
-                    if j < extra_tokens:
-                        tokens_to_distribute[j] += 1
-                remaining = 0
-        for i, target_idx in enumerate(indices):
-            new_num_global_tokens_per_expert[tp_idx, src_ep_rank, target_idx] += tokens_to_distribute[i]
-
-    def get_new_routing_map(self, 
-                            new_num_global_tokens_per_expert: torch.Tensor, 
-                            global_expert_indices: torch.Tensor, 
-                            routing_map: torch.Tensor, 
-                            probs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Get the new routing map.
-        Args:
-            new_num_global_tokens_per_expert: [token_num, num_global_experts]
-            global_expert_indices: [ep_size, num_local_experts]
-        
-        Returns:
-            routing_map: [token_num, num_local_experts * ep_size]
-        """
-        _, num_local_experts = global_expert_indices.shape
-        tp_size, ep_size, num_global_experts = new_num_global_tokens_per_expert.shape
-        origin_expert_num = routing_map.size(1)
-        token_num = routing_map.size(0)
-
-        new_routing_map = torch.zeros((token_num, num_global_experts), 
-                                dtype=routing_map.dtype,
-                                device=routing_map.device)
-        new_probs = torch.zeros((token_num, num_global_experts), 
-                               dtype=probs.dtype,
-                               device=probs.device)
-        
-        expert_to_locations = {}  # expert_id -> [locations...]
-        global_expert_indices_cpu = global_expert_indices.cpu()
-        for ep_rank in range(ep_size):
-            for local_idx in range(num_local_experts):
-                expert_id = global_expert_indices_cpu[ep_rank, local_idx].item()
-                if expert_id not in expert_to_locations:
-                    expert_to_locations[expert_id] = []
-                expert_to_locations[expert_id].append(ep_rank * num_local_experts + local_idx)
-        
-        tp_rank = self.tp_rank
-        ep_rank = self.ep_rank
-        copy_num = new_num_global_tokens_per_expert[tp_rank, ep_rank, :].clone()
-        for i in range(token_num):
-            for j in range(origin_expert_num):
-                if routing_map[i, j]:
-                    if j in expert_to_locations:
-                        for location in expert_to_locations[j]:
-                            if copy_num[location] > 0:
-                                new_routing_map[i, location] = 1
-                                new_probs[i, location] = probs[i, j]
-                                copy_num[location] -= 1
-                                break
-    
-        return new_routing_map, new_probs
-
-    def get_new_routing_map_vectorized(self, new_num_global_tokens_per_expert: torch.Tensor, global_expert_indices: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Get the new routing map with vectorized operation.
-        Args:
-            new_num_global_tokens_per_expert: [token_num, num_global_experts]
-            global_expert_indices: [ep_size, num_local_experts]
-        
-        Returns:
-            routing_map: [token_num, num_local_experts * ep_size]
-        """
-        _, num_local_experts = global_expert_indices.shape
-        tp_size, ep_size, num_global_experts = new_num_global_tokens_per_expert.shape
-        origin_expert_num = routing_map.size(1)
-        token_num = routing_map.size(0)
-
-        device = routing_map.device
-        new_routing_map = torch.zeros((token_num, num_global_experts), 
-                                dtype=routing_map.dtype, device=device)
-        new_probs = torch.zeros((token_num, num_global_experts), 
-                               dtype=probs.dtype, device=device)
-        
-        tp_rank = self.tp_rank
-        ep_rank = self.ep_rank
-        copy_num = new_num_global_tokens_per_expert[tp_rank, ep_rank, :].clone()
-        
-        # create a tensor mapping from expert to locations (vectorized friendly)
-        max_locations_per_expert = ep_size * num_local_experts  # each expert can be in at most num_local_experts locations
-        expert_locations = torch.full((origin_expert_num, max_locations_per_expert), -1, 
-                                    dtype=torch.long, device=device)
-        location_counts = torch.zeros(origin_expert_num, dtype=torch.long, device=device)
-        
-        global_expert_indices_flat = global_expert_indices.flatten().to(device)
-        for i, expert_id in enumerate(global_expert_indices_flat):
-            if expert_id < origin_expert_num:
-                count = location_counts[expert_id]
-                if count < max_locations_per_expert:
-                    expert_locations[expert_id, count] = i
-                    location_counts[expert_id] += 1
-        
-        # vectorized processing: assign all tokens of an expert at once
-        for expert_idx in range(origin_expert_num):
-            if location_counts[expert_idx] == 0:
-                continue
-                
-            # find all tokens routed to this expert (vectorized)
-            token_mask = routing_map[:, expert_idx]
-            token_indices = torch.nonzero(token_mask.flatten(), as_tuple=True)[0]
-            
-            if len(token_indices) == 0:
-                continue
-            
-            # get the valid locations for this expert
-            valid_locations = expert_locations[expert_idx, :location_counts[expert_idx]]
-            
-            # batch allocation strategy
-            num_tokens = len(token_indices)
-            num_locations = len(valid_locations)
-            
-            if num_locations > 0:
-                # calculate how many tokens should be assigned to each location
-                tokens_per_location = copy_num[valid_locations]
-                
-                # simple round-robin allocation (can be further optimized to capacity-aware allocation)
-                allocated = 0
-                for i, location in enumerate(valid_locations):
-                    if allocated >= num_tokens:
-                        break
-                    
-                    # calculate how many tokens can be assigned to this location
-                    available = min(tokens_per_location[i].item(), num_tokens - allocated)
-                    if available > 0:
-                        # batch set routing map and probs
-                        token_batch = token_indices[allocated:allocated + available]
-                        new_routing_map[token_batch, location] = 1
-                        new_probs[token_batch, location] = probs[token_batch, expert_idx]
-                        copy_num[location] -= available
-                        allocated += available
-        
-        return new_routing_map, new_probs
-    
     def get_smart_routing(self, routing_map: torch.Tensor, probs: torch.Tensor) -> torch.Tensor:
         """
         Get the smart routing map.
@@ -427,15 +173,6 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                     self.total_num_global_tokens_per_expert, as_numpy = True, record_stream=True
                 )
         
-        # with torch.no_grad():
-        #     if torch.cuda.current_device() == 0:
-        #         import os
-        #         node_rank = os.getenv("ARNOLD_ID")
-        #         data_str = f"iter {self.iter}, layer {self.layer_number}, routing {num_global_tokens_per_expert.tolist()}\n"
-        #         with open("result/router_log%s.log"%node_rank, "a") as f:
-        #             f.write(data_str)
-        #         self.iter += 1
-                
         num_global_tokens_per_expert = smart_routing_map_gpu(num_global_tokens_per_expert, self.global_expert_locations, self.num_local_experts)
         new_routing_map, new_probs = new_routing_map_with_gradients(num_global_tokens_per_expert, self.global_expert_locations, self.inverse_expert_map, routing_map, probs, self.tp_rank, self.ep_rank)
         return new_routing_map, new_probs
@@ -519,45 +256,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 .reshape(self.ep_size, self.tp_size, self.ep_size * self.num_local_experts) # self.num_experts)
                 .transpose(0, 1)
             )
-            # if len(self.history_num_global_tokens_per_expert) < self.history_capacity:
-            #     self.history_num_global_tokens_per_expert.append(num_global_tokens_per_expert.clone())
-            # else:
-            #     self.history_num_global_tokens_per_expert.append(num_global_tokens_per_expert.clone())
-            #     self.history_num_global_tokens_per_expert.pop(0)
-            
-            # # Submit async linear programming optimization task
-            # if (self.async_lp_solver_config["enabled"]):
-            #     with torch.no_grad():
-            #         self.total_num_global_tokens_per_expert = torch.sum(torch.stack(self.history_num_global_tokens_per_expert)[:,self.tp_rank], dim=0)
-            #     self.cuda_dtoh_stream.wait_stream(torch.cuda.current_stream())
-            #     with torch.cuda.stream(self.cuda_dtoh_stream):
-            #         # TODO: use MemcpyBatchAsync instead.
-            #         self.total_num_global_tokens_per_expert = maybe_move_tensor_to_cpu(
-            #             self.total_num_global_tokens_per_expert, as_numpy = True, record_stream=True
-            #         )
-            # with torch.no_grad():
-            #     if torch.cuda.current_device() == 0:
-            #         import os
-            #         node_rank = os.getenv("ARNOLD_ID")
-            #         data_str = f"iter {self.iter}, layer {self.layer_number}, routing {num_global_tokens_per_expert.tolist()}\n"
-            #         with open("result/router_log%s.log"%node_rank, "a") as f:
-            #             f.write(data_str)
-            #         self.iter += 1
-            # torch.set_printoptions(threshold=1000000)
-            # old_num_global_tokens_per_expert = num_global_tokens_per_expert
-            # num_global_tokens_per_expert = self.get_smart_routing_map(num_global_tokens_per_expert, self.global_expert_indices)
-            # new_routing_map, new_probs = self.get_new_routing_map_vectorized(num_global_tokens_per_expert, self.global_expert_indices, routing_map, probs)
-            # num_global_tokens_per_expert = smart_routing_map_gpu(num_global_tokens_per_expert, self.global_expert_locations, self.num_local_experts)
-            # new_routing_map, new_probs = new_routing_map_vectorized_gpu(num_global_tokens_per_expert, self.global_expert_locations, routing_map, probs, self.tp_rank, self.ep_rank)
-            # new_routing_map, new_probs = new_routing_map_with_gradients(num_global_tokens_per_expert, self.global_expert_locations, self.inverse_expert_map, routing_map, probs, self.tp_rank, self.ep_rank)
             new_routing_map, new_probs = routing_map, probs
-            # torch.set_printoptions(threshold=1000000)
-            # if torch.cuda.current_device() == 0:
-            #     print(f"before:{old_num_global_tokens_per_expert}, {self.global_expert_locations}, {self.num_local_experts}")
-            #     print(f"after:{num_global_tokens_per_expert}")
-            
-            # if torch.cuda.current_device() == 0:
-            #     print(f"before {old_num_global_tokens_per_expert.reshape(-1,8).sum(dim=0)} after {num_global_tokens_per_expert.reshape(-1,8,2).sum(dim=(0,-1))} indices {self.global_expert_indices}")
             self.input_splits = num_global_tokens_per_expert[self.tp_rank, self.ep_rank].reshape(
                 self.ep_size, self.num_local_experts
             ).sum(axis=1)
@@ -634,10 +333,6 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
                 - Permuted token embeddings for local experts.
                 - Number of tokens per expert.
         """
-        # if (self.async_lp_solver_config["enabled"]):
-        #     if hasattr(self, "nxt_dispatcher") and self.fsdp_handle._training_state == HandleTrainingState.FORWARD:
-        #         self.nxt_dispatcher._async_lp_prefetch_logic()
-        
         # Preprocess: Get the metadata for communication, permutation and computation operations.
         self.hidden_shape = hidden_states.shape
         self.probs = probs
@@ -813,21 +508,7 @@ class MoEAlltoAllSmartTokenDispatcher(MoETokenDispatcher):
         if self.shared_experts is not None:
             shared_expert_output = self.shared_experts.get_output()
             output += shared_expert_output
-        
-        # if (self.async_lp_solver_config["enabled"]):
-        #     self.cuda_dtoh_stream.synchronize()
-        #     self.async_lp_task_id = submit_lp_optimization(
-        #         history_data=self.total_num_global_tokens_per_expert,
-        #         layer_number=self.layer_number,
-        #         computation_config_path=self.async_lp_solver_config["computation_config_path"],
-        #         network_config_path=self.async_lp_solver_config["network_config_path"],
-        #         expert_capacity_per_device=self.async_lp_solver_config["expert_capacity_per_device"]
-        #     )
 
-        #     if hasattr(self, "nxt_dispatcher") and self.fsdp_handle._training_state == HandleTrainingState.FORWARD:
-        #         self.nxt_dispatcher.sync_htod()
-        #     # Pass task ID to FSDP layer for prefetch result retrieval
-        #     # self._notify_fsdp_layer_task_id(self.async_lp_task_id, self.cuda_htod_stream)
         return output, None
     
     def sync_lp_solver(self):

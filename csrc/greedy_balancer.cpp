@@ -45,7 +45,7 @@ std::vector<int> allocate_expert_replicas_precise(const std::vector<double>& exp
 
     std::priority_queue<HeapItem> max_heap;
     int now_capacity;
-    if (1LL * node_num * expert_num < total_capacity) {
+    if (1LL * node_num * expert_num <= total_capacity) {
         for (int i = 0; i < expert_num; ++i)
             max_heap.push({expert_loads[i], node_num, i});
         now_capacity = node_num * expert_num;
@@ -219,6 +219,9 @@ std::pair<py::array_t<double>, double> generate_smart_routing_and_calculate_time
 
     const double* E_ptr = static_cast<double*>(E_buf.ptr);
     const double* A_ptr = static_cast<double*>(A_buf.ptr);
+
+    const int gpus_per_node = 8;
+    const int n_node = n_device / gpus_per_node;
     
     /* Create output array S[n_device][n_expert][n_device] */
     std::vector<size_t> shape = {static_cast<size_t>(n_device), 
@@ -232,10 +235,10 @@ std::pair<py::array_t<double>, double> generate_smart_routing_and_calculate_time
     std::fill(S_ptr, S_ptr + n_device * n_expert * n_device, 0.0);
     
     /* Initialize time calculation variables */
-    std::vector<double> comm_times(n_device, 0.0);
+    std::vector<double> intra_comm_times(n_node, 0.0);
+    std::vector<double> inter_comm_times(n_device, 0.0);
     std::vector<double> comp_times(n_device, 0.0);
     
-    const int gpus_per_node = 8;
     
     /* Build location and weight maps for each expert - optimized data structure */
     struct ExpertLocation {
@@ -303,7 +306,7 @@ std::pair<py::array_t<double>, double> generate_smart_routing_and_calculate_time
                         
                         /* Calculate time simultaneously, using pre-calculated constants */
                         double bw = bandwidth_function(src_device, loc.device, v_intra, v_inter);
-                        comm_times[src_device] += token_factor * tokens_to_assign / bw;
+                        intra_comm_times[src_device/gpus_per_node] += token_factor * tokens_to_assign / bw;
                         comp_times[loc.device] += tokens_to_assign * comp_factor;
                     }
                 }
@@ -328,7 +331,7 @@ std::pair<py::array_t<double>, double> generate_smart_routing_and_calculate_time
                         
                         /* Calculate time simultaneously, using pre-calculated constants */
                         double bw = bandwidth_function(src_device, loc.device, v_intra, v_inter);
-                        comm_times[src_device] += token_factor * tokens_to_assign / bw;
+                        inter_comm_times[src_device] += token_factor * tokens_to_assign / bw;
                         comp_times[loc.device] += tokens_to_assign * comp_factor;
                     }
                 }
@@ -337,7 +340,7 @@ std::pair<py::array_t<double>, double> generate_smart_routing_and_calculate_time
     }
     
     /* Calculate total time */
-    double total_comm = std::accumulate(comm_times.begin(), comm_times.end(), 0.0);
+    double total_comm = std::accumulate(inter_comm_times.begin(), inter_comm_times.end(), 0.0) + *std::max_element(intra_comm_times.begin(), intra_comm_times.end());
     double max_comp = *std::max_element(comp_times.begin(), comp_times.end());
     double total_time = 4 * total_comm + (3 + (global_checkpoint ? 1 : 0)) * max_comp;
     

@@ -2,7 +2,7 @@ import logging
 import torch
 import os
 from torch import Tensor, nn
-from typing import List, Union, Dict, Union, Any, Tuple, cast, Optional, Sequence, no_type_check
+from typing import List, Union, Dict, Any, Tuple, cast, Optional, Sequence, no_type_check
 import torch.distributed as dist
 from torch.distributed.utils import (
     _p_assert,
@@ -39,20 +39,9 @@ from torch.distributed.fsdp._runtime_utils import (
     _post_reduce_grad_callback,
 )
 
-# Import async linear programming solver
-from galvatron.core.runtime.moe.prefetch.async_linear_programming import (
-    submit_lp_optimization,
-    get_lp_optimization_result,
-    cleanup_global_lp_solver
-    )
-
 from galvatron.core.runtime.moe.fused_kernel import (
-    triton_optimized_all_to_all_expert_weights,
-    triton_optimized_all_to_all_expert_grads,
     cuda_optimized_all_to_all_expert_weights,
     cuda_optimized_all_to_all_expert_grads,
-    hierarchical_all_to_all_expert_weights,
-    hierarchical_all_to_all_expert_grads,
 )
 
 import moe_all_to_all_kernels
@@ -232,37 +221,6 @@ def new_init(self, *args, **kwargs):
         original_init(self, *args, **kwargs)
     else:
         _new_init(self, *args, **kwargs)
-
-# def _async_lp_prefetch_logic(self):
-#     """Async linear programming prefetch logic - get results from pending tasks"""
-#     if self.lp_pending_task_id is not None:
-#         result = get_lp_optimization_result(self.lp_pending_task_id, timeout=0.0)
-#         if result is not None:
-#             self._process_lp_result(result)
-#             self.lp_pending_task_id = None
-
-# def _process_lp_result(self, result):
-#     """Process linear programming optimization result"""
-#     if result.get("status") == "success":
-#         # Here optimization results can be applied to routing strategy
-#         # Actual implementation needs to be adjusted based on specific MoE router interface
-#         # print(f"Linear programming optimization result: {result}")
-#         self.global_placement = result.get("expert_placement")
-#         self.global_expert_locations = result.get("global_expert_locations")
-#         self.inverse_expert_map = result.get("inverse_expert_map")
-#         self._fully_sharded_module.token_dispatcher.global_expert_indices = self.global_placement
-#         self._fully_sharded_module.token_dispatcher.global_expert_locations = self.global_expert_locations
-#         self._fully_sharded_module.token_dispatcher.inverse_expert_map = self.inverse_expert_map
-        
-#     else:
-#         assert False, f"Linear programming optimization failed {result}"
-
-# def set_lp_task_id(self, task_id, stream):
-#     """Set async linear programming task ID from smart routing"""
-#     if hasattr(self, 'lp_pending_task_id'):
-#         self.lp_pending_task_id = task_id
-#     if not hasattr(self, 'htod_stream'):
-#         self.htod_stream = stream
 
 def new_init_flat_param_and_metadata(
     self,
@@ -507,95 +465,6 @@ def new_flatten_tensors_into_flat_param(
             flat_param_data = flat_param_data.reshape(self.global_expert_num, self.world_size, -1).permute(1,0,2).reshape(-1).contiguous()
     return FlatParameter(flat_param_data, requires_grad=requires_grad)
 
-def _all_to_all_flat_param_type1(
-    self,
-    padded_unsharded_flat_param: Tensor,
-    sharded_flat_param: Tensor,
-    process_group: dist.ProcessGroup,
-):
-    sharded_flat_param = sharded_flat_param.contiguous().reshape(self.global_expert_num, -1)  # (expert_num, expert_shard_size)
-    expert_shard_size = sharded_flat_param.numel() // self.global_expert_num
-    send_list = []
-    recv_list = []
-
-    # TODO: Reduce communication volume if experts are same
-    for rank in range(self.world_size): 
-        needed_experts = self.global_placement[rank]
-        send_data = sharded_flat_param[needed_experts]  # (len(needed_experts), expert_shard_size)
-        send_list.append(send_data.contiguous())
-
-        recv_shape = (self.local_expert_num, expert_shard_size)
-        recv_data = torch.empty(recv_shape, dtype=sharded_flat_param.dtype, device=sharded_flat_param.device)
-        recv_list.append(recv_data)
-    
-    dist.all_to_all(recv_list, send_list, group=process_group)
-    padded_unsharded_flat_param = padded_unsharded_flat_param.reshape(self.local_expert_num, -1)
-    for rank, recv_data in enumerate(recv_list):
-        start_col = rank * expert_shard_size
-        end_col = (rank + 1) * expert_shard_size
-        padded_unsharded_flat_param[:, start_col:end_col].copy_(recv_data)
-    padded_unsharded_flat_param = padded_unsharded_flat_param.reshape(-1)
-    sharded_flat_param = sharded_flat_param.reshape(-1)
-    return padded_unsharded_flat_param, sharded_flat_param
-
-@torch.no_grad()
-def _all_to_all_grad_type1(
-    handle: FlatParamHandle,
-    padded_unsharded_grad: Tensor,
-    new_sharded_grad: Tensor,
-    process_group: dist.ProcessGroup,
-):
-    expert_shard_size = new_sharded_grad.numel() // handle.global_expert_num
-    
-    padded_unsharded_grad = padded_unsharded_grad.reshape(handle.local_expert_num, -1)
-    
-    send_list = []
-    recv_list = []
-    
-    # TODO: Reduce communication volume if experts are same
-    for rank in range(handle.world_size):
-        start_col = rank * expert_shard_size
-        end_col = (rank + 1) * expert_shard_size
-        send_data = padded_unsharded_grad[:, start_col:end_col].contiguous()  # (local_expert_num, expert_shard_size)
-        send_list.append(send_data)
-
-        recv_shape = (handle.local_expert_num, expert_shard_size)
-        recv_data = torch.empty(recv_shape, dtype=padded_unsharded_grad.dtype, device=padded_unsharded_grad.device)
-        recv_list.append(recv_data)
-    
-    dist.all_to_all(recv_list, send_list, group=process_group)
-    
-    new_sharded_grad.zero_()
-    new_sharded_grad = new_sharded_grad.reshape(handle.global_expert_num, -1)
-    for rank, recv_data in enumerate(recv_list):
-        needed_experts = handle.global_placement[rank]
-        new_sharded_grad.index_add_(0, needed_experts.view(-1), recv_data)
-    new_sharded_grad = new_sharded_grad.reshape(-1)
-
-    padded_unsharded_grad = padded_unsharded_grad.reshape(-1)
-    return padded_unsharded_grad, new_sharded_grad
-
-def _all_to_all_flat_param_type2_triton(
-    self,
-    padded_unsharded_flat_param: Tensor,
-    sharded_flat_param: Tensor,
-    process_group,
-):
-    """Triton-optimized expert weights all_to_all operation"""
-    sharded_flat_param = sharded_flat_param.contiguous().reshape(self.global_expert_num, -1)
-    
-    # Use Triton-optimized all_to_all
-    padded_unsharded_flat_param, sharded_flat_param = triton_optimized_all_to_all_expert_weights(
-        padded_unsharded_flat_param,
-        sharded_flat_param,
-        self.global_placement,
-        self.world_size,
-        self.local_expert_num,
-        process_group
-    )
-    
-    return padded_unsharded_flat_param, sharded_flat_param
-
 def _all_to_all_flat_param_type3_cuda(
     self,
     padded_unsharded_flat_param: Tensor,
@@ -605,8 +474,6 @@ def _all_to_all_flat_param_type3_cuda(
     """CUDA-optimized expert weights all_to_all operation"""
     sharded_flat_param = sharded_flat_param.contiguous()
     # .reshape(self.global_expert_num, -1)
-    # if torch.cuda.current_device() == 0:
-    #     print(f"forward: {self._fully_sharded_module.idx} {self.global_placement_cpu}")
     # Use Triton-optimized all_to_all
     padded_unsharded_flat_param, sharded_flat_param = cuda_optimized_all_to_all_expert_weights(
         padded_unsharded_flat_param,
@@ -620,50 +487,6 @@ def _all_to_all_flat_param_type3_cuda(
     
     return padded_unsharded_flat_param, sharded_flat_param
 
-def _all_to_all_flat_param_type4_hierarchical(
-    self,
-    padded_unsharded_flat_param: Tensor,
-    sharded_flat_param: Tensor,
-    process_group,
-):
-    """CUDA-optimized expert weights all_to_all operation"""
-    sharded_flat_param = sharded_flat_param.contiguous()
-    # .reshape(self.global_expert_num, -1)
-    
-    # Use Triton-optimized all_to_all
-    padded_unsharded_flat_param, sharded_flat_param = hierarchical_all_to_all_expert_weights(
-        padded_unsharded_flat_param,
-        sharded_flat_param,
-        self.global_placement_cpu,
-        self.world_size,
-        self.local_expert_num,
-        self.global_expert_num,
-        ep_inter_node_group_dict[self.world_size],
-    )
-    
-    return padded_unsharded_flat_param, sharded_flat_param
-
-
-def _all_to_all_grad_type2_triton(
-    handle: FlatParamHandle,
-    padded_unsharded_grad: Tensor,
-    new_sharded_grad: Tensor,
-    process_group,
-):
-    """Triton-optimized expert gradient all_to_all operation"""
-    # Use Triton-optimized gradient all_to_all
-    padded_unsharded_grad, new_sharded_grad = triton_optimized_all_to_all_expert_grads(
-        padded_unsharded_grad,
-        new_sharded_grad,
-        handle.global_placement,
-        handle.world_size,
-        handle.global_expert_num,
-        handle.local_expert_num,
-        process_group
-    )
-    
-    return padded_unsharded_grad, new_sharded_grad
-
 def _all_to_all_grad_type3_cuda(
     handle: FlatParamHandle,
     padded_unsharded_grad: Tensor,
@@ -671,8 +494,6 @@ def _all_to_all_grad_type3_cuda(
     process_group,
 ):
     """CUDA-optimized expert gradient all_to_all operation"""
-    # if torch.cuda.current_device() == 0:
-    #     print(f"backward: {handle._fully_sharded_module.idx} {handle.global_placement_cpu}")
     padded_unsharded_grad, new_sharded_grad = cuda_optimized_all_to_all_expert_grads(
         padded_unsharded_grad,
         new_sharded_grad,
@@ -685,27 +506,6 @@ def _all_to_all_grad_type3_cuda(
     )
     
     return padded_unsharded_grad, new_sharded_grad
-
-def _all_to_all_grad_type4_hierarchical(
-    handle: FlatParamHandle,
-    padded_unsharded_grad: Tensor,
-    new_sharded_grad: Tensor,
-    process_group,
-):
-    """CUDA-optimized expert gradient all_to_all operation"""
-    padded_unsharded_grad, new_sharded_grad = hierarchical_all_to_all_expert_grads(
-        padded_unsharded_grad,
-        new_sharded_grad,
-        handle.global_placement_cpu,
-        handle.global_placement,
-        handle.world_size,
-        handle.global_expert_num,
-        handle.local_expert_num,
-        ep_inter_node_group_dict[handle.world_size],
-    )
-    
-    return padded_unsharded_grad, new_sharded_grad
-
 
 def new_all_gather_flat_param(
     self,
@@ -902,20 +702,10 @@ FlatParamHandle.flatten_tensors_into_flat_param = new_flatten_tensors_into_flat_
 FlatParamHandle._all_gather_flat_param = new_all_gather_flat_param
 
 FlatParamHandle.prepare_gradient_for_backward = new_prepare_gradient_for_backward
-# FlatParamHandle.set_lp_task_id = set_lp_task_id
-# FlatParamHandle._async_lp_prefetch_logic = _async_lp_prefetch_logic
-# FlatParamHandle._process_lp_result = _process_lp_result
-
-# TODO: maybe improve this function to save memory? (same experts)
-# FlatParamHandle._use_unsharded_views = new_use_unsharded_views
 
 _runtime_utils._reduce_grad = new_reduce_grad
-if os.getenv("ENABLE_HIERARCHICAL", "0") == "0":
-    FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type3_cuda
-    _all_to_all_grad = _all_to_all_grad_type3_cuda
-else:
-    FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type4_hierarchical
-    _all_to_all_grad = _all_to_all_grad_type4_hierarchical
+FlatParamHandle._all_to_all_flat_param = _all_to_all_flat_param_type3_cuda
+_all_to_all_grad = _all_to_all_grad_type3_cuda
 
 from torch.distributed.fsdp._runtime_utils import _catch_all_reshard, _finalize_params
 
