@@ -1,14 +1,20 @@
 import os
 import torch
 import torch.nn.functional as F
-from megatron.core.tensor_parallel.utils import VocabUtility
 import argparse
 import gc
+import galvatron
 
 embedding_name = "model_embed_tokens.pt"
 layer_name = "model_layers_%d.pt"
 ln_f_name = "model_norm.pt"
 cls_name = "lm_head.pt"
+
+def vocab_range_from_global_vocab_size(num_experts, ep_rank, ep_size):
+    numerator = num_experts // ep_size
+    index_f = ep_rank * numerator
+    index_l = index_f + numerator
+    return index_f, index_l
 
 def convert_checkpoint_format(input_dir, output_dir, tp_size, ep_size, num_layers, hidden_size=4096, vocab_size=32000, num_experts=8, num_attention_heads=32, num_key_value_heads=8, head_dim=128, use_cache=True):
     os.makedirs(output_dir, exist_ok=True)
@@ -127,6 +133,8 @@ def convert_checkpoint_format(input_dir, output_dir, tp_size, ep_size, num_layer
         all_proj_slices = []
         ln_qkv_weight = None
         ln_mlp_weight = None
+        ln_q_weight = None
+        ln_k_weight = None
         
         for tp_rank in range(tp_size):
             # print(f"tp_rank: {tp_rank}")
@@ -170,7 +178,7 @@ def convert_checkpoint_format(input_dir, output_dir, tp_size, ep_size, num_layer
                 if f"decoder.layers.{layer_idx}.mlp.router.weight" in model_state:
                     router_weight = to_gpu(model_state[f"decoder.layers.{layer_idx}.mlp.router.weight"])
 
-                expert_start_index, expert_end_index = VocabUtility.vocab_range_from_global_vocab_size(
+                expert_start_index, expert_end_index = vocab_range_from_global_vocab_size(
                     num_experts, ep_rank, ep_size
                 )
                 

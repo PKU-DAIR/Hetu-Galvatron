@@ -55,7 +55,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
         padding_size = args.padded_vocab_size - vocab_size
         padded_weight = F.pad(
             checkpoint["embed_tokens.weight"].to(device="cuda", dtype=torch.float32),
-            (0, 0, padding_size, 0),
+            (0, 0, 0, padding_size),
             mode="constant",
             value=0,
         )
@@ -76,7 +76,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
         padding_size = args.padded_vocab_size - vocab_size
         padded_weight = F.pad(
             checkpoint["weight"].to(device="cuda", dtype=torch.float32),
-            (0, 0, padding_size, 0),
+            (0, 0, 0, padding_size),
             mode="constant",
             value=0,
         )
