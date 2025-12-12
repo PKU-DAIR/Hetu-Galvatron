@@ -6,13 +6,6 @@ from torch.utils.cpp_extension import BuildExtension, CUDAExtension
 import pathlib
 import os
 
-try:
-    import fused_dense_lib, dropout_layer_norm, rotary_emb, xentropy_cuda_lib
-except ImportError:
-    fused_dense_lib, dropout_layer_norm, rotary_emb, xentropy_cuda_lib = None, None, None, None
-    
-
-FLASH_ATTN_INSTALL = os.getenv("GALVATRON_FLASH_ATTN_INSTALL", "FALSE") == "TRUE"
 MOE_KERNELS_INSTALL = os.getenv("GALVATRON_MOE_KERNELS_INSTALL", "TRUE") == "TRUE"
 
 here = pathlib.Path(__file__).parent.resolve()
@@ -21,24 +14,9 @@ class CustomInstall(install):
     def run(self):
         install.run(self)
 
-        # custom install flash-attention cuda ops by running shell scripts
-        if FLASH_ATTN_INSTALL:
-            cwd = pathlib.Path.cwd()
-            
-            if fused_dense_lib is None or dropout_layer_norm is None or rotary_emb is None or xentropy_cuda_lib is None:
-                self.spawn(["bash", str(cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh")])
-
 class CustomDevelop(develop):
     def run(self):
         develop.run(self)
-
-        # custom install flash-attention cuda ops by running shell scripts
-        if FLASH_ATTN_INSTALL:
-            cwd = pathlib.Path.cwd()
-            
-            if fused_dense_lib is None or dropout_layer_norm is None or rotary_emb is None or xentropy_cuda_lib is None:
-                self.spawn(["bash", str(cwd / "galvatron" / "scripts" / "flash_attn_ops_install.sh")])
-
 
 class CustomBuildExt(build_ext):
     def run(self):
@@ -68,15 +46,6 @@ class CustomBuildExtension(BuildExtension):
         
         # Call parent class run method
         super().run()
-
-
-# Define the extension modules
-dp_core_ext = Extension(
-    'galvatron_dp_core',
-    sources=['csrc/dp_core.cpp'],
-    extra_compile_args=['-O3', '-Wall', '-shared', '-std=c++11', '-fPIC'],
-    language='c++'
-)
 
 # Greedy balancer extension
 greedy_balancer_ext = Extension(
@@ -125,16 +94,6 @@ _deps = [
 
 ]
 
-if FLASH_ATTN_INSTALL:
-    _deps.append("packaging")
-    _deps.append("flash-attn>=2.0.8")
-
-data_files = [
-    (os.path.join('galvatron', 'site_package', 'megatron', 'core', 'datasets'),
-     [os.path.join('galvatron', 'site_package', 'megatron', 'core', 'datasets', 'helpers.cpp'),
-      os.path.join('galvatron', 'site_package', 'megatron', 'core', 'datasets', 'Makefile')])
-]
-
 setup(
     name="hetu-galvatron",
     version="1.0.0",
@@ -151,7 +110,6 @@ setup(
     ),
     package_data={"": ["*.json"]},
     include_package_data=True,
-    scripts=["galvatron/scripts/flash_attn_ops_install.sh"],
     python_requires=">=3.8",
     cmdclass={
         "install": CustomInstall,
@@ -160,7 +118,6 @@ setup(
     },
     install_requires=_deps,
     setup_requires=["pybind11>=2.9.1"],
-    ext_modules=[dp_core_ext, greedy_balancer_ext] + ([moe_kernels_ext] if moe_kernels_ext else []),
-    data_files=data_files
+    ext_modules=[greedy_balancer_ext] + ([moe_kernels_ext] if moe_kernels_ext else []),
 )
 
