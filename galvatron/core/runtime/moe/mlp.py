@@ -1,6 +1,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import copy
+import os
 import itertools
 from copy import deepcopy
 from functools import partial, wraps
@@ -194,6 +195,13 @@ class SequentialMLP(MegatronModule):
         for _ in range(self.num_local_experts):
             expert = MLP(self.config, submodules, is_expert=True, tp_group = tp_of_ep_group, tp_and_ep_group = tp_and_ep_group)
             self.local_experts.append(expert)
+        
+        if os.getenv("TOKEN_COUNTS_ITER", "0") != "0":
+            self.token_num_log = []
+            self.global_rank = dist.get_rank()
+            self.iter_num = int(os.getenv("TOKEN_COUNTS_ITER"))
+        else:
+            self.iter_num = 0
 
     def _pad_tensor_for_fp8(self, hidden):
         """Padding tensor shape to multiples of 16."""
@@ -209,6 +217,15 @@ class SequentialMLP(MegatronModule):
 
     def forward(self, permuted_local_hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
         """Forward step of the SequentialMLP."""
+        if self.iter_num > 0:
+            self.token_num_log.append(sum(tokens_per_expert))
+            if len(self.token_num_log) == 2 * self.iter_num:
+                with open(f"token_counts/{os.getenv('METHOD')}_token_counts_{os.getenv('MODEL_SIZE')}_{os.getenv('DATA')}_batch{os.getenv('BATCH_SIZE')}_seq{os.getenv('SEQUENCE_LENGTH')}_aux{os.getenv('AUX')}_layer{self.layer_number}_{self.global_rank}.txt", "w") as f:
+                    for token_num in self.token_num_log:
+                        f.write(str(token_num) + "\n")
+            elif len(self.token_num_log) > 2 * self.iter_num:
+                print("Finish logging token number!")
+                exit(0)
         with torch.profiler.record_function("expert_computation_time"):
             if self.num_local_experts == 1:
                 if self.config.fp8:

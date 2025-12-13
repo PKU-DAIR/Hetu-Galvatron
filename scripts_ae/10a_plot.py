@@ -43,6 +43,28 @@ def prepare_plot_data(df):
     plot_data_16 = []
     plot_data_8 = []
     
+    # Expected models and methods
+    expected_models = ['mixtral-8x7b-e16k4', 'mixtral-8x7b-e8k2']
+    expected_methods = ['FSDP', 'FLEX', 'LAER']
+    
+    # Get available models and methods from data
+    available_models = df['model_name'].unique().tolist() if not df.empty else []
+    available_methods = df['method'].unique().tolist() if not df.empty else []
+    
+    # Check for missing models
+    missing_models = [m for m in expected_models if m not in available_models]
+    if missing_models:
+        print(f"Warning: Missing model data: {missing_models}")
+    
+    # Check for missing methods per model
+    for model in expected_models:
+        if model in available_models:
+            model_data = df[df['model_name'] == model]
+            model_methods = model_data['method'].unique().tolist()
+            missing_methods = [m for m in expected_methods if m not in model_methods]
+            if missing_methods:
+                print(f"Warning: Model {model} missing methods: {missing_methods}")
+    
     for (model_name, method), group in df.groupby(['model_name', 'method']):
         avg_alltoall = group['alltoall_time'].mean()
         avg_expert = group['expert_time'].mean()
@@ -57,19 +79,19 @@ def prepare_plot_data(df):
             'method': method
         }
         
-        if model_name == 'Mixtral-8x7b-e16k4':
+        if model_name == 'mixtral-8x7b-e16k4':
             plot_data_16.append(plot_item)
-        elif model_name == 'Mixtral-8x7b-e8k2':
+        elif model_name == 'mixtral-8x7b-e8k2':
             plot_data_8.append(plot_item)
     
-    solver_order = ['NONE', 'FLEX', 'FSEP']
+    solver_order = ['FSDP', 'FLEX', 'LAER']
     def sort_by_method(data_list):
         return sorted(data_list, key=lambda x: solver_order.index(x['method']) if x['method'] in solver_order else 999)
     
     plot_data_16 = sort_by_method(plot_data_16)
     plot_data_8 = sort_by_method(plot_data_8)
     
-    label_mapping = {'NONE': 'FSDP+EP', 'FLEX': 'FlexMoE', 'FSEP': 'LAER-MoE'}
+    label_mapping = {'FSDP': 'FSDP+EP', 'FLEX': 'FlexMoE', 'LAER': 'LAER-MoE'}
     labels_16 = [label_mapping[d['method']] for d in plot_data_16]
     labels_8 = [label_mapping[d['method']] for d in plot_data_8]
     
@@ -124,7 +146,12 @@ def plot_subplot(ax, plot_data, labels, model_name):
     ax.set_xticks(x_pos)
     ax.set_xticklabels(labels, fontsize=6, rotation=0)
     
-    if ax.get_subplotspec().colspan.start == 0:
+    # Set ylabel for leftmost subplot or single subplot
+    try:
+        if ax.get_subplotspec().colspan.start == 0:
+            ax.set_ylabel('Time (seconds)', fontsize=7.5, labelpad=0)
+    except (AttributeError, ValueError):
+        # Single subplot or subplotspec not available, always set ylabel
         ax.set_ylabel('Time (seconds)', fontsize=7.5, labelpad=0)
     
     ax.text(0.5, -0.3, model_name, ha='center', va='center', 
@@ -151,18 +178,26 @@ def plot_subplot(ax, plot_data, labels, model_name):
     ax.tick_params(axis='x', which='major', labelsize=6)
     ax.tick_params(axis='y', which='major', labelsize=7.5)
 
-def plot_time_timeline(df, output_dir=None):
+def plot_time_timeline(df):
     """Plot stacked bar chart showing time breakdown"""
     if df is None or df.empty:
-        print("No data to plot")
+        print("Error: No data to plot")
         return
     
     plot_data_16, plot_data_8, labels_16, labels_8 = prepare_plot_data(df)
     
     if not plot_data_16 and not plot_data_8:
-        print("No valid data for plotting")
+        print("Error: No valid data for plotting")
         return
     
+    # Determine which models have data
+    has_data_8 = len(plot_data_8) > 0
+    has_data_16 = len(plot_data_16) > 0
+    
+    if not has_data_8 and not has_data_16:
+        print("Error: No valid plot data available")
+        return
+
     plt.style.use('default')
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Liberation Sans', 'Arial', 'Helvetica', 'sans-serif']
@@ -182,8 +217,8 @@ def plot_time_timeline(df, output_dir=None):
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(3.17, 1.2))
     colors = ['#1f4e79', '#5b9bd5', '#a5c6e8']
     
-    plot_subplot(ax1, plot_data_8, labels_8, 'Mixtral-8x7b-e8k2')
-    plot_subplot(ax2, plot_data_16, labels_16, 'Mixtral-8x7b-e16k4')
+    plot_subplot(ax1, plot_data_8, labels_8, 'mixtral-8x7b-e8k2')
+    plot_subplot(ax2, plot_data_16, labels_16, 'mixtral-8x7b-e16k4')
     
     legend_elements = [
         Patch(facecolor=colors[0], label='All-to-All'),
@@ -201,20 +236,23 @@ def plot_time_timeline(df, output_dir=None):
     plt.savefig(chart_path, dpi=300, bbox_inches='tight')
     print(f"Chart saved to: {chart_path}")
 
-def main():
+def main(type=None):
     """Main function"""
-    csv_file = sys.argv[1] if len(sys.argv) > 1 else os.path.join(BASE_DIR, CSV_FILE)
-    output_dir = sys.argv[2] if len(sys.argv) > 2 else None
+
+    if type == "default":
+        csv_file = os.path.join(BASE_DIR, BACKUP_CSV_FILE)
+    else:
+        csv_file = os.path.join(BASE_DIR, CSV_FILE)
     
     print("Starting to plot breakdown chart...")
     print(f"CSV file: {csv_file}")
     
     df = load_data(csv_file)
     if df is not None:
-        plot_time_timeline(df, output_dir)
+        plot_time_timeline(df)
         print("\nPlotting completed!")
     else:
         print("Failed to load data")
 
 if __name__ == "__main__":
-    main()
+    main(sys.argv[1] if len(sys.argv) > 1 else None) 
