@@ -71,16 +71,18 @@ bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 
 ## Plotting Figures
 
-To analysis these data and plot figures presented in the paper, we also provide `plot_{id}.py` to plot the corresponding figure. For example, to plot Figure 8, we use the following command:
+To analysis these data and plot figures presented in the paper, we also provide `plot_{id}.py` to plot the corresponding figure. For example, to plot Figure 8/9, we use the following command:
 
 ```
 bash scripts_ae/8_plot.sh new
+bash scripts_ae/9_plot.sh new
 ```
 
-To get Figure 8 in the paper, we use the following command:
+To get Figure 8/9 in the paper, we use the following command:
 
 ```
 bash scripts_ae/8_plot.sh default
+bash scripts_ae/9_plot.sh default
 ```
 
 To plot Figure 10(a), we use the following command:

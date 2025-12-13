@@ -9,7 +9,7 @@ iter=$3
 
 model_name=mixtral-8x7b-e8k2
 dataset=wikitext
-batch_size=256
+batch_size=128
 seq_length=4096
 save_or_load=2
 
@@ -23,7 +23,7 @@ if [ "$approach" == "megatron" ]; then
     expert_num=8
     topk=2
     expert_parallel=8
-    tensor_parallel=8
+    tensor_parallel=4
 
     if [ -d "$BASE_DIR/checkpoints/megatron_convergence/$model_name" ]; then
         echo "Training $model_name with $approach..."
@@ -36,7 +36,7 @@ if [ "$approach" == "megatron" ]; then
         exit 1
     fi
 else
-    chunk=2
+    chunk=1
     layer_num=32
     capacity=2    
     if [ -d "$BASE_DIR/checkpoints/laer_convergence/$model_name" ]; then

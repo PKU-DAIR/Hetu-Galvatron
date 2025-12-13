@@ -16,6 +16,8 @@ def parse_filename(filename):
     match = re.match(pattern, filename)
     
     if match:
+        if int(match.group(5)) != 8192:
+            return None
         return {
             'method': match.group(1),
             'model_name': match.group(2),
