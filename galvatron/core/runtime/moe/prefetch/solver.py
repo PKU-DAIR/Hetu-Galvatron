@@ -235,3 +235,83 @@ class MoEOptimizer:
             comp_times.append(comp_time)
         
         return max(comp_times)
+
+    def _generate_smart_routing(self, n_device: int, n_expert: int, E: List[List[int]], 
+                                               A: np.ndarray) -> np.ndarray:
+        """Generate robust routing strategy using pre-allocated replica capacities with smart routing logic
+        Based on fused_kernel.py routing logic"""
+        S = np.zeros((n_device, n_expert, n_device))
+        
+        gpus_per_node = 8  # Assuming 8 GPUs per node
+        
+        def get_node_id(device):
+            return device // gpus_per_node
+        
+        A = copy.deepcopy(A)
+        # Build expert locations for each expert
+        expert_locations = {}  # expert_id -> [device_ids]
+        expert_weights = {}
+        for expert in range(n_expert):
+            expert_locations[expert] = []
+            expert_weights[expert] = []
+            for device in range(n_device):
+                if A[expert, device] > 0:
+                    expert_locations[expert].append(device)
+                    expert_weights[expert].append(A[expert, device])
+        
+        # Process each source device and expert
+        for src_device in range(n_device):
+            src_node = get_node_id(src_device)
+            
+            for expert in range(n_expert):
+                tokens_for_expert = E[src_device][expert]
+                if tokens_for_expert == 0:
+                    continue
+                
+                if expert not in expert_locations or not expert_locations[expert]:
+                    continue
+                
+                # Separate intra-node and inter-node locations
+                intra_locations = []
+                intra_weights = []
+                inter_locations = []
+                inter_weights = []
+                
+                for location, weight in zip(expert_locations[expert], expert_weights[expert]):
+                    target_node = get_node_id(location)
+                    if target_node == src_node:
+                        intra_locations.append(location)
+                        intra_weights.append(weight)
+                    else:
+                        inter_locations.append(location)
+                        inter_weights.append(weight)
+                
+                remaining_tokens = tokens_for_expert
+                
+                # Phase 1: Intra-node routing (evenly distribute)
+                if intra_locations:
+                    intra_count = sum(intra_weights)
+                    tokens_per_location = remaining_tokens // intra_count
+                    extra_tokens = remaining_tokens % intra_count
+
+                    for location, weight in zip(intra_locations, intra_weights):
+                        tokens_to_assign = tokens_per_location
+                        
+                        S[src_device, expert, location] += tokens_to_assign * weight + min(weight, extra_tokens)
+                        extra_tokens -= min(weight, extra_tokens)
+                    
+                    remaining_tokens = 0
+                
+                # Phase 2: Inter-node routing (evenly distribute remaining tokens)
+                if remaining_tokens > 0 and inter_locations:
+                    inter_count = sum(inter_weights)
+                    tokens_per_location = remaining_tokens // inter_count
+                    extra_tokens = remaining_tokens % inter_count
+                    
+                    for location, weight in zip(inter_locations, inter_weights):
+                        tokens_to_assign = tokens_per_location
+                        
+                        S[src_device, expert, location] += tokens_to_assign * weight + min(weight, extra_tokens)
+                        extra_tokens -= min(weight, extra_tokens)
+        
+        return S
