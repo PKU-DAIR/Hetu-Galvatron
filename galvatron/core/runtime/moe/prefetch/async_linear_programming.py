@@ -88,20 +88,14 @@ def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, 
         # Call linear_programming_solve
         start_time = time.time()
 
-        if task_data["solver"] == "SMART":
-            # print(f"{task_data['solver_iter'] = }")
-            if task_data["solver_iter"] % 20 == 0:
-            # print("ENABLE SMART")
-                max_load, obj_value, A_res = optimizer.smartmoe_method(
-                    E=E,
-                    n_device=n_device,
-                    n_expert=num_experts,
-                    C_e=C_e,
-                )
-            else:
-                max_load, obj_value, A_res = optimizer.keep_previous(
-                    global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
-                )
+        if task_data["solver"] == "FLEX":
+            max_load, obj_value, A_res = optimizer.flexmoe_method(
+                E=E,
+                n_device=n_device,
+                n_expert=num_experts,
+                C_e=C_e,
+                global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
+            )
         elif task_data["solver"] == "LAER":
             max_load, obj_value, A_res = optimizer.greedy_load_balancing_heuristic(
                 E=E,

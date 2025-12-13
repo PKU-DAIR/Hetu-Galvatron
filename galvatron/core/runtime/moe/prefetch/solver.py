@@ -12,7 +12,8 @@ Supports GPU tensor output for efficient integration with CUDA kernels
 """
 import numpy as np
 import json
-from typing import Tuple
+import copy
+from typing import Tuple, List
 import greedy_balancer as gb
 
 class MoEOptimizer:
@@ -69,23 +70,23 @@ class MoEOptimizer:
         """Greedy load balancing heuristic with expert replication"""
         return gb.greedy_load_balancing_heuristic_complete(n_device, n_expert, E, C_e, self.hidden_size * 2, 2, self.v_comp, self.V_intra, self.V_inter, self.global_checkpoint)
 
-    def smartmoe_method(self,
-                        n_device,
-                        n_expert,
-                        E,
-                        C_e,
-                        ) -> Tuple:
+    def flexmoe_method(self,
+                       E: List[List[int]],
+                       n_device: int,
+                       n_expert: int,
+                       C_e: int,
+                       global_expert_indices_numpy: np.ndarray = None,
+                       max_iteration: int = 10) -> Tuple:
         """
-        Smart MoE method implementing greedy expert placement algorithm
-        Based on Algorithm 1: Greedy Expert Placement from the paper
+        FlexMoE method implementing dynamic scheduling and load balancing
+        Based on Algorithm 1: Scheduler and Algorithm 2: MakeSchedulingPlan
         
         Args:
+            E: Token demand matrix [n_device][n_expert]
             n_device: Total number of devices
             n_expert: Total number of experts
-            E: Token demand matrix [n_device][n_expert]
             C_e: Maximum experts per device
-            M_token: Token size in bytes
-            ep_size: Expert placement size (default 4 devices per unit)
+            default_A: np.ndarray = None,
             
         Returns:
             Tuple: (A, S, total_time) where:
@@ -93,75 +94,144 @@ class MoEOptimizer:
                 S: Token routing matrix
                 total_time: Total computation time
         """
-        ep_size = n_expert // C_e
-        # Initialize arrays as per Algorithm 1
-        samples = [0] * (ep_size)  # Current samples per device
-        experts = [0] * (ep_size)   # Current experts per device
-        P = [[] for _ in range(n_expert)]  # Placement of experts
-        
-        # Calculate expert loads (total tokens per expert across all devices)
         expert_loads = [sum(E[i][j] for i in range(n_device)) for j in range(n_expert)]
+        default_A = np.zeros((n_expert, n_device))
+
+        for i in range(n_device):
+            for j in range(C_e):
+                default_A[global_expert_indices_numpy[i, j], i] += 1
         
-        # Sort experts by load in descending order (C in Algorithm 1)
-        sorted_experts = sorted(range(n_expert), key=lambda x: expert_loads[x], reverse=True)
-        
-        # Process each expert in descending order of load
-        for expert_idx in sorted_experts:
-            expert_load = expert_loads[expert_idx]
+        if default_A is None:
+            default_A, P = self.get_default_A(E, n_device, n_expert, C_e)
+        else:
+            A = copy.deepcopy(default_A)
+            P = np.zeros((n_device, C_e))
+            length = [0] * n_device
+
+            for expert in range(n_expert):
+                for device in range(n_device):
+                    while A[expert, device] > 0:
+                        P[device, length[device]] = expert
+                        length[device] += 1
+                        A[expert, device] -= 1
+
+        balance_ratio, now_S, now_cost = self._calculate_balance_ratio(E, default_A, n_device, n_expert)
             
-            # Find the best device for this expert
-            Tmin = float('inf')
-            best_device = -1
-            
-            # Check all devices for placement
-            for device in range(ep_size):
-                # Check capacity constraints: experts[device] < E/N and samples[device] < Tmin
-                if (experts[device] < C_e and 
-                    samples[device] < Tmin):
-                    Tmin = samples[device]
-                    best_device = device
-            
-            # If we found a suitable device, place the expert
-            assert best_device != -1, "No suitable device found for expert"
-            P[expert_idx].append(best_device)
-            samples[best_device] += expert_load
-            experts[best_device] += 1
-        
-        # Convert placement to assignment matrix A
-        A = np.zeros((n_expert, n_device))
-        for expert in range(n_expert):
-            for device in P[expert]:
-                for k in range(n_device//ep_size):
-                    A[expert, k * ep_size + device] = 1
-        # print(A, samples)
-        # print(expert_loads)
-        # S = self._generate_smart_routing(n_device, n_expert, E, A)
-        # total_time = self._calculate_total_time(n_device, n_expert, S, M_token)
-        
-        # Convert A to the expected format
+        A = default_A
+        # Main optimization loop (Algorithm 1)
+        while balance_ratio > 1 and max_iteration > 0:
+            max_iteration -= 1
+            # Generate scheduling plan (Algorithm 2)
+            new_A = copy.deepcopy(A)
+            new_A = self._make_scheduling_plan(expert_loads, A, now_S, n_device, n_expert, C_e)
+
+            new_balance_ratio, new_S, new_cost = self._calculate_balance_ratio(E, new_A, n_device, n_expert)
+
+            # print(new_cost, now_cost)
+
+            if new_cost < now_cost or new_balance_ratio < balance_ratio:
+                now_cost = new_cost
+                now_S = new_S
+                A = new_A
+                balance_ratio = new_balance_ratio
+            else:
+                break
+
+        # Generate routing matrix S
         A_res = []
         for j in range(n_device):
             tmp = []
             for i in range(n_expert):
-                if abs(A[i, j] - 1) < 1e-6:
+                while abs(A[i, j]) > 1e-6:
                     tmp.append(i)
+                    A[i, j] -= 1
             A_res.append(tmp)
-        
-        # print(A)
         return 0, 0, A_res
+    
+    def _calculate_balance_ratio(self, E: List[List[int]], A: np.ndarray, 
+                                n_device: int, n_expert: int) -> float: 
+        """Calculate balance ratio (Equation 6)"""
 
-    def keep_previous(self,
-                        global_expert_indices_numpy: np.ndarray,
-                        ) -> Tuple:
+        S = self._generate_smart_routing(n_device, n_expert, E, A)
+
+        device_loads = S.sum(axis=(0,1))
+        # Calculate balance ratio (max load / min load)
+        max_load = max(device_loads)
+        min_load = min(device_loads)
+
+        cost = self._calculate_total_time(n_device, n_expert, S)
+        
+        return max_load / min_load, S, cost
+    
+    def _make_scheduling_plan(self, expert_loads: List[float], A: np.ndarray, 
+                              now_S: np.ndarray, n_device: int, n_expert: int, C_e: int) -> List[Tuple]:
         """
-        Keep previous placement
+        Make scheduling plan (Algorithm 2: MakeSchedulingPlan)
+        Returns list of (operation, expert_id) tuples
         """
-        n_device = global_expert_indices_numpy.shape[0]
-        C_e = global_expert_indices_numpy.shape[1]
-        A_res = []
+        expert_replicas = A.sum(axis=1)
+        expert_loads = [expert_loads[i] // expert_replicas[i] for i in range(n_expert)]
+        device_loads = now_S.sum(axis=(0,1))
+
+        sorted_expert = sorted(range(n_expert), key=lambda x: expert_loads[x], reverse=True)
+        argmax_expert = sorted_expert[0]
+        node = n_device // 8
+        idx = n_expert - 1
+        while expert_replicas[sorted_expert[idx]] == node:
+            idx -= 1
+        argmin_expert = sorted_expert[idx]
+        if argmax_expert == argmin_expert:
+            return A
+
+        new_A = copy.deepcopy(A)
+        
+        for i in range(node):
+            argmax_device = []
+            argmin_device = []
+            for j in range(8):
+                if new_A[argmax_expert, i * 8 + j] > 0:
+                    argmax_device.append(i * 8 + j)
+                if new_A[argmin_expert, i * 8 + j] > 0:
+                    argmin_device.append(i * 8 + j)
+
+            final_argmin_device = min(argmin_device, key=lambda x: device_loads[x])
+            
+            final_argmax_device = -1
+            for device in argmax_device:
+                if new_A[argmax_expert, device] < C_e:
+                    final_argmax_device = device
+                    break
+            
+            if final_argmax_device == -1:
+                new_A[argmax_expert, final_argmin_device] += 1
+                new_A[argmin_expert, final_argmin_device] -= 1
+            elif final_argmax_device == final_argmin_device:
+                new_A[argmax_expert, final_argmax_device] += 1
+                new_A[argmin_expert, final_argmin_device] -= 1
+            else:
+                new_expert = []
+                for expert in range(n_expert):
+                    if expert != argmax_expert and new_A[expert, final_argmax_device] > 0:
+                        new_expert.append(expert)
+
+                new_expert = max(new_expert, key=lambda x: expert_loads[x])
+                new_A[argmax_expert, final_argmax_device] += 1
+                new_A[argmin_expert, final_argmin_device] -= 1
+                new_A[new_expert, final_argmax_device] -= 1
+                new_A[new_expert, final_argmin_device] += 1
+
+        return new_A
+
+    def _calculate_total_time(self, n_device: int, n_expert: int, S: np.ndarray) -> float:
+        """Calculate total time (objective function)"""
+        comp_times = []
+        
         for i in range(n_device):
-            tmp = []
-            for j in range(C_e):
-                    tmp.append(global_expert_indices_numpy[i, j])
-            A_res.append(tmp)
-        return 0, 0, A_res
+            comp_time = 0
+            for k in range(n_device):
+                for j in range(n_expert):
+                    if S[k, j, i] > 0:
+                        comp_time += S[k, j, i]
+            comp_times.append(comp_time)
+        
+        return max(comp_times)
