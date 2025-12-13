@@ -23,7 +23,7 @@ if [ "$type" == "convergence" ]; then
         topk=2
         expert_parallel=8
         tensor_parallel=4
-        mkdir -p $BASE_DIR/checkpoints/megatron_convergence/$model_name
+        mkdir -p $BASE_DIR/checkpoints/megatron_convergence
 
         if [ -d "$BASE_DIR/checkpoints/megatron_convergence/$model_name" ]; then
             echo "checkpoints/megatron_convergence/$model_name already exists"
@@ -42,7 +42,7 @@ if [ "$type" == "convergence" ]; then
         if [ `expr $ARNOLD_ID - 0` -eq 0 ]; then
             echo "Converting checkpoint to LAER-MoE format..."
             cd $BASE_DIR/LAER-MoE
-            mkdir -p $BASE_DIR/checkpoints/laer_convergence/$model_name
+            mkdir -p $BASE_DIR/checkpoints/laer_convergence
             python galvatron/tools/convert_to_laer.py \
                 --input_dir $BASE_DIR/checkpoints/megatron_convergence/$model_name/release \
                 --output_dir $BASE_DIR/checkpoints/laer_convergence/$model_name \
@@ -108,7 +108,7 @@ if [ "$model_name" == "mixtral-8x22b-e16k4" ]; then
     tensor_parallel=4
 fi
 
-mkdir -p $BASE_DIR/checkpoints/megatron/$model_name
+mkdir -p $BASE_DIR/checkpoints/megatron
 if [ -d "$BASE_DIR/checkpoints/megatron/$model_name" ]; then
     echo "checkpoints/megatron/$model_name already exists"
 else
@@ -126,7 +126,7 @@ fi
 if [ `expr $ARNOLD_ID - 0` -eq 0 ]; then
     echo "Converting checkpoint to LAER-MoE format..."
     cd $BASE_DIR/LAER-MoE
-    mkdir -p $BASE_DIR/checkpoints/laer/$model_name
+    mkdir -p $BASE_DIR/checkpoints/laer
     python galvatron/tools/convert_to_laer.py \
         --input_dir $BASE_DIR/checkpoints/megatron/$model_name/release \
         --output_dir $BASE_DIR/checkpoints/laer/$model_name \

@@ -53,12 +53,15 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
         args = get_args()
         vocab_size = checkpoint["embed_tokens.weight"].shape[0]
         padding_size = args.padded_vocab_size - vocab_size
-        padded_weight = F.pad(
-            checkpoint["embed_tokens.weight"].to(device="cuda", dtype=torch.float32),
-            (0, 0, 0, padding_size),
-            mode="constant",
-            value=0,
-        )
+        if padding_size >= 0:
+            padded_weight = F.pad(
+                checkpoint["embed_tokens.weight"].to(device="cuda", dtype=torch.float32),
+                (0, 0, 0, padding_size),
+                mode="constant",
+                value=0,
+            )
+        else:
+            padded_weight = checkpoint["embed_tokens.weight"][:args.padded_vocab_size].contiguous()
         vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_global_vocab_size(
             args.padded_vocab_size, rank, world_size
         )
@@ -74,12 +77,15 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module, ep_groups):
         args = get_args()
         vocab_size = checkpoint["weight"].shape[0]
         padding_size = args.padded_vocab_size - vocab_size
-        padded_weight = F.pad(
-            checkpoint["weight"].to(device="cuda", dtype=torch.float32),
-            (0, 0, 0, padding_size),
-            mode="constant",
-            value=0,
-        )
+        if padding_size >= 0:
+            padded_weight = F.pad(
+                checkpoint["weight"].to(device="cuda", dtype=torch.float32),
+                (0, 0, 0, padding_size),
+                mode="constant",
+                value=0,
+            )
+        else:
+            padded_weight = checkpoint["weight"][:args.padded_vocab_size].contiguous()
         vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_global_vocab_size(
             args.padded_vocab_size, rank, world_size
         )
