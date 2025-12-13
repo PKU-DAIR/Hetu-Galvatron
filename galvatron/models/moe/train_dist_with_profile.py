@@ -107,7 +107,7 @@ def train(args):
         
         prof.step()
         if iter == profile_iter:
-            with open(f"trainging_log/breakdown/{os.getenv('METHOD')}_breakdown_{os.getenv('MODEL_SIZE')}_{os.getenv('DATA')}_batch{os.getenv('BATCH_SIZE')}_seq{os.getenv('SEQUENCE_LENGTH')}_aux{os.getenv('AUX')}_{torch.distributed.get_rank()}.txt", "w") as f:
+            with open(f"training_log/breakdown/{os.getenv('METHOD')}_breakdown_{os.getenv('MODEL_SIZE')}_{os.getenv('DATA')}_batch{os.getenv('BATCH_SIZE')}_seq{os.getenv('SEQUENCE_LENGTH')}_aux{os.getenv('AUX')}_{torch.distributed.get_rank()}.txt", "w") as f:
                 f.write(prof.key_averages().table(sort_by="cuda_time_total", row_limit=200))
             prof.stop()
             exit(0)
