@@ -39,7 +39,7 @@ bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 
 #### Breakdown (Figure 10(a))
 
-`breakdown.sh` will start the case study in §5.3. In the following command, the `approach` is the training approach to use, which can be one of `LAER, FLEX, FSDP`. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`. Each evaluation will be corresponding to a bar in Figure 10(a). For default setting, `aux_loss` is `1e-4`, and `dataset` is `wikitext`.
+`breakdown.sh` will start the case study in §5.3. In the following command, the `approach` is the training approach to use, which can be one of `LAER, FLEX, FSDP`. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`. Each evaluation will be corresponding to a bar in Figure 10(a). For default setting, `aux_loss` is `0`, and `dataset` is `wikitext`.
 
 ```
 ./scripts_ae/breakdown.sh <approach> <model_name>

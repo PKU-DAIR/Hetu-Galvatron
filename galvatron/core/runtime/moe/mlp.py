@@ -209,37 +209,38 @@ class SequentialMLP(MegatronModule):
 
     def forward(self, permuted_local_hidden_states: torch.Tensor, tokens_per_expert: torch.Tensor):
         """Forward step of the SequentialMLP."""
-        if self.num_local_experts == 1:
-            if self.config.fp8:
-                hidden = self._pad_tensor_for_fp8(permuted_local_hidden_states)
-                output, output_bias = self.local_experts[0](hidden)
-                output = output[: permuted_local_hidden_states.shape[0]]
-            else:
-                output, output_bias = self.local_experts[0](permuted_local_hidden_states)
-
-            return output, output_bias
-        else:
-            tokens_per_expert = tokens_per_expert.tolist()
-            tokens_list = torch.split(permuted_local_hidden_states, tokens_per_expert)
-
-            output_local_list = []
-            output_bias_list = []
-
-            for expert, tokens in zip(self.local_experts, tokens_list):
+        with torch.profiler.record_function("expert_computation_time"):
+            if self.num_local_experts == 1:
                 if self.config.fp8:
-                    hidden = self._pad_tensor_for_fp8(tokens)
-                    output, output_bias = expert(hidden)
-                    output = output[: tokens.shape[0]]
+                    hidden = self._pad_tensor_for_fp8(permuted_local_hidden_states)
+                    output, output_bias = self.local_experts[0](hidden)
+                    output = output[: permuted_local_hidden_states.shape[0]]
                 else:
-                    output, output_bias = expert(tokens)
-                output_local_list.append(output)
-                if self.add_bias:
-                    output_bias_list.append(output_bias.expand_as(output))
+                    output, output_bias = self.local_experts[0](permuted_local_hidden_states)
 
-            output_local = torch.cat(output_local_list, dim=0)
-            if self.add_bias:
-                output_bias_local = torch.cat(output_bias_list, dim=0)
+                return output, output_bias
             else:
-                output_bias_local = None
+                tokens_per_expert = tokens_per_expert.tolist()
+                tokens_list = torch.split(permuted_local_hidden_states, tokens_per_expert)
 
-            return output_local, output_bias_local
+                output_local_list = []
+                output_bias_list = []
+
+                for expert, tokens in zip(self.local_experts, tokens_list):
+                    if self.config.fp8:
+                        hidden = self._pad_tensor_for_fp8(tokens)
+                        output, output_bias = expert(hidden)
+                        output = output[: tokens.shape[0]]
+                    else:
+                        output, output_bias = expert(tokens)
+                    output_local_list.append(output)
+                    if self.add_bias:
+                        output_bias_list.append(output_bias.expand_as(output))
+
+                output_local = torch.cat(output_local_list, dim=0)
+                if self.add_bias:
+                    output_bias_local = torch.cat(output_bias_list, dim=0)
+                else:
+                    output_bias_local = None
+
+                return output_local, output_bias_local
