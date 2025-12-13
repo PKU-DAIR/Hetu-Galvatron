@@ -9,30 +9,22 @@ Note: Please complete the steps in `../README.md` first. We assume everything ha
 
 #### Prepare checkpoints
 
-We placed the checkpoints in the `checkpoints` directory, where `checkpoints/megatron/{name}` is in Megatron-LM format adn `checkpoints/laer/{name}` is in LAER-MoE format. To maintain the same training accuracy, LAER-MoE and the baseline start training from the same checkpoint. We use the following command to save the Megatron-LM checkpoint:
+We placed the checkpoints in the `checkpoints` directory, where `checkpoints/megatron/{name}` is in Megatron-LM format adn `checkpoints/laer/{name}` is in LAER-MoE format. To maintain the same training accuracy, LAER-MoE and the baseline start training from the same checkpoint. We use the following command to save the Megatron-LM checkpoint and convert it to LAER-MoE checkpoint:
 
-```
-cd Megatron
-bash save_checkpoint.sh {name}
-```
-where `{name}` is the name of the model, e.g., `mixtral-8x7b-e8k2`.
-
-To convert the Megatron-LM checkpoint to LAER-MoE checkpoint, we use the following command:
 ```
 cd LAER-MoE
-python galvatron/tools/convert_checkpoint.py \
-       --checkpoint-path ../checkpoints/megatron/{name} \
-       --output-path ../checkpoints/laer/{name} \
-       --model-name {name}
+bash scripts_ae/save_checkpoint.sh {name} {type}
 ```
-where `{name}` is the name of the model, e.g., `mixtral-8x7b-e8k2`.
+where `{name}` is the name of the model, e.g., `mixtral-8x7b-e8k2`, `{type}` is the type of the checkpoint, which can be one of `e2e`, `convergence`. For `e2e`, the checkpoint will be saved in `checkpoints/megatron/{name}` and `checkpoints/laer/{name}`; for `convergence`, the checkpoint will be saved in `checkpoints/megatron_convergence/{name}` and `checkpoints/laer_convergence/{name}`. To ensure the best performance of the baseline, we use different parallel strategies for end-to-end analysis and convergence study, so that users need to generate the checkpoints respectively for each case.
+
+When the command is finished, there will be a `checkpoints/megatron/{name}` and `checkpoints/laer/{name}` directory, which is the Megatron-LM checkpoint and LAER-MoE checkpoint respectively. For `convergence`, there will be a `checkpoints/megatron_convergence/{name}` and `checkpoints/laer_convergence/{name}` directory, which is the Megatron-LM checkpoint and LAER-MoE checkpoint respectively.
 
 #### End-to-End Evaluation (Figure 8)
 
-`e2e.sh` will start the end-to-end evaluation in §5.2. In the following command, the `approach` is the training approach to use, which can be one of `LAER, SMART, FSDP, Megatron`. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`, `mixtral-8x22b-e8k2`, `mixtral-8x22b-e16k4`, `qwen-8x7b-e8k2`, `qwen-8x7b-e16k4`. `aux_loss` is the auxiliary loss coefficient, which can be one of `0.0`, `1e-4`, and `dataset` is the dataset to evaluate on, which can be one of `wikitext`, `C4`. Each evaluation will be corresponding to a bar in Figure 8.
+`e2e.sh` will start the end-to-end evaluation in §5.2. In the following command, the `approach` is the training approach to use, which can be one of `LAER, FLEX, FSDP, megatron`. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`, `mixtral-8x22b-e8k2`, `mixtral-8x22b-e16k4`, `qwen-8x7b-e8k2`, `qwen-8x7b-e16k4`. `aux_loss` is the auxiliary loss coefficient, which can be one of `0.0`, `1e-4`, and `dataset` is the dataset to evaluate on, which can be one of `wikitext`, `C4`. Each evaluation will be corresponding to a bar in Figure 8.
 
 ```
-./scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
+bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 ```
 
 #### Convergence study (Figure 9)
@@ -47,7 +39,7 @@ where `{name}` is the name of the model, e.g., `mixtral-8x7b-e8k2`.
 
 #### Breakdown (Figure 10(a))
 
-`breakdown.sh` will start the case study in §5.3. In the following command, the `approach` is the training approach to use, which can be one of `LAER, SMART, FSDP`. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`. Each evaluation will be corresponding to a bar in Figure 10(a). For default setting, `aux_loss` is `1e-4`, and `dataset` is `wikitext`.
+`breakdown.sh` will start the case study in §5.3. In the following command, the `approach` is the training approach to use, which can be one of `LAER, FLEX, FSDP`. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`. Each evaluation will be corresponding to a bar in Figure 10(a). For default setting, `aux_loss` is `1e-4`, and `dataset` is `wikitext`.
 
 ```
 ./scripts_ae/breakdown.sh <approach> <model_name>
@@ -82,11 +74,17 @@ where `{name}` is the name of the model, e.g., `mixtral-8x7b-e8k2`.
 To analysis these data and plot figures presented in the paper, we also provide `plot_{id}.py` to plot the corresponding figure. For example, to plot Figure 8, we use the following command:
 
 ```
-python scripts_ae/plot_8.py
+bash scripts_ae/8_plot.sh new
+```
+
+To get Figure 8 in the paper, we use the following command:
+
+```
+bash scripts_ae/8_plot.sh default
 ```
 
 To plot Figure 10(a), we use the following command:
 
 ```
-python scripts_ae/plot_10a.py
+bash scripts_ae/10_plot.sh
 ```
