@@ -200,6 +200,7 @@ class SequentialMLP(MegatronModule):
             self.token_num_log = []
             self.global_rank = dist.get_rank()
             self.iter_num = int(os.getenv("TOKEN_COUNTS_ITER"))
+            self.chunks = int(os.getenv("CHUNK"))
         else:
             self.iter_num = 0
 
@@ -219,8 +220,8 @@ class SequentialMLP(MegatronModule):
         """Forward step of the SequentialMLP."""
         if self.iter_num > 0:
             self.token_num_log.append(sum(tokens_per_expert))
-            if len(self.token_num_log) == 2 * self.iter_num:
-                with open(f"token_counts/{os.getenv('METHOD')}_token_counts_{os.getenv('MODEL_SIZE')}_{os.getenv('DATA')}_batch{os.getenv('BATCH_SIZE')}_seq{os.getenv('SEQUENCE_LENGTH')}_aux{os.getenv('AUX')}_layer{self.layer_number}_{self.global_rank}.txt", "w") as f:
+            if len(self.token_num_log) == 2 * self.iter_num * self.chunks:
+                with open(f"training_log/token_counts/{os.getenv('METHOD')}_token_counts_{os.getenv('MODEL_SIZE')}_{os.getenv('DATA')}_batch{os.getenv('BATCH_SIZE')}_seq{os.getenv('SEQUENCE_LENGTH')}_aux{os.getenv('AUX')}_layer{self.layer_number}_{self.global_rank}.txt", "w") as f:
                     for token_num in self.token_num_log:
                         f.write(str(token_num) + "\n")
             elif len(self.token_num_log) > 2 * self.iter_num:
