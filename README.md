@@ -85,8 +85,11 @@ bash scripts_ae/8_plot.sh default
 bash scripts_ae/9_plot.sh default
 ```
 
-To plot Figure 10(a), we use the following command:
+To plot Figure 10(a) and 10(b), we use the following command:
 
 ```
-bash scripts_ae/10_plot.sh
+bash scripts_ae/10a_plot.sh {type}
+bash scripts_ae/10b_plot.sh {type}
 ```
+
+where `{type}` is the type of the plot, which can be one of `default` or `new`.
