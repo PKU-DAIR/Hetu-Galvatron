@@ -1,7 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 import torch
-
+import os
 from megatron.core.parallel_state import (
     get_global_memory_buffer,
     get_tensor_model_parallel_group,
@@ -498,10 +498,11 @@ class _AllToAll_with_event(torch.autograd.Function):
             input_split_sizes=input_split_sizes,
             group=group,
         )
-        if (not is_backward) and (forward_event is not None):
-            forward_event.record()
-        if (is_backward) and (backward_event is not None):
-            backward_event.record()
+        if os.getenv("ABLATION_APPROACH") != "no_comm_opt":
+            if (not is_backward) and (forward_event is not None):
+                forward_event.record()
+            if (is_backward) and (backward_event is not None):
+                backward_event.record()
         return output
 
     @staticmethod

@@ -97,11 +97,22 @@ def _solve_optimization_task(task_data: Dict[str, Any], optimizer) -> Dict[str, 
                 global_expert_indices_numpy=task_data["global_expert_indices_numpy"],
             )
         elif task_data["solver"] == "LAER":
+            if task_data["ablation_approach"] == "no_even":
+                no_even = True
+                no_pq = False
+            elif task_data["ablation_approach"] == "no_pq":
+                no_even = False
+                no_pq = True
+            else:
+                no_even = False
+                no_pq = False
             max_load, obj_value, A_res = optimizer.greedy_load_balancing_heuristic(
                 E=E,
                 n_device=n_device,
                 n_expert=num_experts,
                 C_e=C_e,
+                no_even=no_even,
+                no_pq=no_pq,
             )
         else:
             max_load, obj_value, A_res = optimizer.default_placement(
@@ -178,6 +189,7 @@ class AsyncLinearProgrammingSolver:
         self.expert_capacity_per_device = expert_capacity_per_device
         self.num_workers = num_workers
         self.solver = os.getenv("SOLVER")
+        self.ablation_approach = os.getenv("ABLATION_APPROACH", "LAER")
         
         # Communication queues
         self.task_queue = Queue()
@@ -253,6 +265,7 @@ class AsyncLinearProgrammingSolver:
             "expert_capacity_per_device": self.expert_capacity_per_device,
             "timestamp": time.time(),
             "solver": self.solver,
+            "ablation_approach": self.ablation_approach,
             "solver_iter": solver_iter,
             "global_expert_indices_numpy": global_expert_indices_numpy,
         }

@@ -898,8 +898,12 @@ def new_init_exec_order_data(
         self._iter = 0
 
         # FSEP UPD: Modify prefetch limit
-        backward_prefetch_limit = 2
-        forward_prefetch_limit = 2
+        if os.getenv("ABLATION_APPROACH") == "no_comm_opt":
+            backward_prefetch_limit = 1
+            forward_prefetch_limit = 1
+        else:
+            backward_prefetch_limit = 2
+            forward_prefetch_limit = 2
         # Gives the max number of backward/forward prefetched all-gathers by a
         # single module
         self._backward_prefetch_limit = backward_prefetch_limit

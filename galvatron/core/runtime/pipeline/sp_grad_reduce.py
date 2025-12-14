@@ -123,7 +123,7 @@ def _post_backward_hook_sp(
                     flat_param.grad.data[offset : offset + size].copy_(all_ln_data[idx : idx + size])
                     idx += size
 
-            if handle.is_moe_layer:
+            if handle.is_moe_layer and os.getenv("ABLATION_APPROACH") != "no_comm_opt":
                 get_delayed_gradient().delay_gradient(handle, state)
             else:
                 if handle.uses_sharded_strategy:

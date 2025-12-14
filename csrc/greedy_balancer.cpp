@@ -351,11 +351,16 @@ std::pair<py::array_t<double>, double> generate_smart_routing_and_calculate_time
 py::tuple greedy_load_balancing_heuristic(int n_device,
                                           int n_expert,
                                           const py::array_t<double>& E_np,
-                                          int C_e) {
+                                          int C_e,
+                                          bool no_even = false,
+                                          bool no_pq = false) {
     /* Parse numpy 2D array E */
     py::buffer_info buf = E_np.request();
     if (buf.ndim != 2 || buf.shape[0] != n_device || buf.shape[1] != n_expert)
         throw std::runtime_error("E shape mismatch");
+    if (no_even ^ no_pq == 1) {
+        throw std::runtime_error("no_even and no_pq must be different");
+    }
 
     const double* E_ptr = static_cast<double*>(buf.ptr);
     std::vector<double> expert_loads(n_expert, 0.0);
@@ -367,17 +372,19 @@ py::tuple greedy_load_balancing_heuristic(int n_device,
     GreedyResult best;
 
     /* 1) Average replica strategy */
-    if ((C_e * n_device) % n_expert == 0) {
-        int r = C_e * n_device / n_expert;
-        std::vector<int> replicas(n_expert, r);
-        best = get_greedy_placement(replicas, expert_loads, n_device, n_expert, C_e);
+    if (no_pq) {
+        if ((C_e * n_device) % n_expert == 0) {
+            int r = C_e * n_device / n_expert;
+            std::vector<int> replicas(n_expert, r);
+            best = get_greedy_placement(replicas, expert_loads, n_device, n_expert, C_e);
+        }
     }
 
     /* 2) Precise replica strategy */
-    auto replicas = allocate_expert_replicas_precise(expert_loads, n_device, C_e);
-    auto res = get_greedy_placement(replicas, expert_loads, n_device, n_expert, C_e);
-    if (best.A.empty() || res.max_load < best.max_load)
-        best = std::move(res);
+    if (no_even) {
+        auto replicas = allocate_expert_replicas_precise(expert_loads, n_device, C_e);
+        best = get_greedy_placement(replicas, expert_loads, n_device, n_expert, C_e);
+    }
 
     /* 3) Generate Python list[list[int]] A_res */
     py::list A_res;
@@ -508,7 +515,9 @@ PYBIND11_MODULE(greedy_balancer, m) {
           py::arg("n_device"),
           py::arg("n_expert"),
           py::arg("E"),
-          py::arg("C_e"));
+          py::arg("C_e"),
+          py::arg("no_even") = false,
+          py::arg("no_pq") = false);
     m.def("greedy_load_balancing_heuristic_complete", &greedy_load_balancing_heuristic_complete,
           py::arg("n_device"),
           py::arg("n_expert"),

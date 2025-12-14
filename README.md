@@ -47,7 +47,7 @@ bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 
 #### Maximum token counts (Figure 10(b))
 
-`token_counts.sh` will start the case study in §5.3. In the following command, the `approach` is the training approach to use. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`. Each evaluation will be corresponding to a curve in Figure 10(b). For default setting, `aux_loss` is `1e-4`, and `dataset` is `wikitext`.
+`token_counts.sh` will start the case study in §5.3. In the following command, the `approach` is the training approach to use. `model_name` is the name of the model, which can be one of `mixtral-8x7b-e8k2`, `mixtral-8x7b-e16k4`. Each evaluation will be corresponding to a curve in Figure 10(b). For default setting, `aux_loss` is `0`, and `dataset` is `wikitext`.
 
 ```
 ./scripts_ae/token_counts.sh <approach> <model_name>
@@ -63,7 +63,7 @@ bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 
 ### Ablation study (Figure 12)
 
-`ablation.sh` will start the ablation study in §5.5. In the following command, the `approach` is the training approach to use, which can be one of `LAER, no_even, no_pq, no_comm_opt`. Each evaluation will be corresponding to a bar in Figure 12. For default setting, `model_name` is `mixtral-8x7b-e8k2`, `aux_loss` is `1e-4`, and `dataset` is `wikitext`.
+`ablation.sh` will start the ablation study in §5.5. In the following command, the `approach` is the training approach to use, which can be one of `LAER, no_even, no_pq, no_comm_opt`. Each evaluation will be corresponding to a bar in Figure 12. For default setting, `model_name` is `mixtral-8x7b-e8k2`, `aux_loss` is `0`, and `dataset` is `wikitext`.
 
 ```
 ./scripts_ae/ablation.sh <approach>
