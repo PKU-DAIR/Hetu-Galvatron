@@ -61,9 +61,14 @@ bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 ./scripts_ae/planner.sh <N> <C>
 ```
 
+Users can also run the planner.sh with no arguments to get the average time for each (N, C) pair by running the following command:
+```
+./scripts_ae/planner.sh
+```
+
 ### Ablation study (Figure 12)
 
-`ablation.sh` will start the ablation study in §5.5. In the following command, the `approach` is the training approach to use, which can be one of `LAER, no_even, no_pq, no_comm_opt`. Each evaluation will be corresponding to a bar in Figure 12. For default setting, `model_name` is `mixtral-8x7b-e8k2`, `aux_loss` is `0`, and `dataset` is `wikitext`.
+`ablation.sh` will start the ablation study in §5.5. In the following command, the `approach` is the training approach to use, which can be one of `LAER, no_even, no_pq, no_comm_opt, FSDP`. Each evaluation will be corresponding to a bar in Figure 12. For default setting, `model_name` is `mixtral-8x7b-e8k2`, `aux_loss` is `0`, and `dataset` is `wikitext`.
 
 ```
 ./scripts_ae/ablation.sh <approach>
@@ -71,25 +76,10 @@ bash scripts_ae/e2e.sh <approach> <model_name> <aux_loss> <dataset>
 
 ## Plotting Figures
 
-To analysis these data and plot figures presented in the paper, we also provide `plot_{id}.py` to plot the corresponding figure. For example, to plot Figure 8/9, we use the following command:
+To analysis these data and plot figures presented in the paper, we also provide `plot.sh` script to plot the corresponding figure. For example, to plot Figure 8/9, we use the following command:
 
 ```
-bash scripts_ae/8_plot.sh new
-bash scripts_ae/9_plot.sh new
+bash scripts_ae/plot.sh <figure_id> <type>
 ```
 
-To get Figure 8/9 in the paper, we use the following command:
-
-```
-bash scripts_ae/8_plot.sh default
-bash scripts_ae/9_plot.sh default
-```
-
-To plot Figure 10(a) and 10(b), we use the following command:
-
-```
-bash scripts_ae/10a_plot.sh {type}
-bash scripts_ae/10b_plot.sh {type}
-```
-
-where `{type}` is the type of the plot, which can be one of `default` or `new`.
+where `{figure_id}` is the id of the figure, which can be one of `8`, `9`, `10a`, `10b`, `11`, `12`. `{type}` is the type of the plot, which can be one of `default` or `new`. For `default`, the script will plot the figure with the data used in the paper. For `new`, the script will first analyze the new experiment results and then plot the figure.

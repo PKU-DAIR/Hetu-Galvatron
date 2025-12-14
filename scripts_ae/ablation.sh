@@ -3,7 +3,7 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
-if [ "$approach" != "LAER" ] && [ "$approach" != "no_even" ] && [ "$approach" != "no_pq" ] && [ "$approach" != "no_comm_opt" ]; then
+if [ "$approach" != "LAER" ] && [ "$approach" != "no_even" ] && [ "$approach" != "no_pq" ] && [ "$approach" != "no_comm_opt" ] && [ "$approach" != "FSDP" ]; then
     echo "Invalid approach: $approach"
     exit 1
 fi

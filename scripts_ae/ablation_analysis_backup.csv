@@ -1,0 +1,6 @@
+method,avg_time_ms
+FSDP,35661.15
+LAER,26325.37
+no_comm_opt,28592.11
+no_even,28332.58
+no_pq,31699.77
