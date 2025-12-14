@@ -185,6 +185,26 @@ def plot_token_analysis(df, config_2_iter_range=(15, 16), config_4_iter_range=(5
     global_max_4 = max([max(data['config_4']) for method, data in plot_data.items() 
                         if data['config_4'] and any(v > 0 for v in data['config_4'])], default=1)
     
+    # Calculate perfect balance normalized values for y-axis limits
+    perfect_balance_2_normalized = None
+    perfect_balance_4_normalized = None
+    
+    for solver_type in solver_order:
+        if solver_type in plot_data:
+            # For config_2
+            if plot_data[solver_type]['perfect_balance_2'] and any(v > 0 for v in plot_data[solver_type]['perfect_balance_2']):
+                perfect_balance_2_normalized = [v / global_max_2 if global_max_2 > 0 else 0 
+                                                for v in plot_data[solver_type]['perfect_balance_2']]
+                break
+    
+    for solver_type in solver_order:
+        if solver_type in plot_data:
+            # For config_4
+            if plot_data[solver_type]['perfect_balance_4'] and any(v > 0 for v in plot_data[solver_type]['perfect_balance_4']):
+                perfect_balance_4_normalized = [v / global_max_4 if global_max_4 > 0 else 0 
+                                                for v in plot_data[solver_type]['perfect_balance_4']]
+                break
+    
     plt.style.use('default')
     plt.rcParams['font.family'] = 'sans-serif'
     plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Liberation Sans', 'Arial', 'Helvetica', 'sans-serif']
@@ -216,7 +236,13 @@ def plot_token_analysis(df, config_2_iter_range=(15, 16), config_4_iter_range=(5
     except (AttributeError, ValueError):
         ax1.set_ylabel('Relative Max Token Count', fontsize=7.5)
     ax1.set_xlim(-0.5, 31.5)
-    ax1.set_ylim(0.3, 1.05)
+    # Calculate y-axis lower limit based on perfect balance value
+    if perfect_balance_2_normalized:
+        perfect_mean_2 = np.mean([v for v in perfect_balance_2_normalized if v > 0]) if any(v > 0 for v in perfect_balance_2_normalized) else 0.3
+        y_min_2 = max(0, perfect_mean_2 - 0.1)
+    else:
+        y_min_2 = 0.3
+    ax1.set_ylim(y_min_2, 1.05)
     ax1.set_xticks(range(0, 32, 4))
     ax1.set_yticks(np.arange(0.4, 1.05, 0.2))
     ax1.grid(True, alpha=0.3, linewidth=0.8, linestyle='-')
@@ -234,7 +260,13 @@ def plot_token_analysis(df, config_2_iter_range=(15, 16), config_4_iter_range=(5
     ax2.set_title('Mixtral-8x7B e16k4', fontsize=7.5, pad=0)
     ax2.set_xlabel('Layer Index', fontsize=7.5)
     ax2.set_xlim(-0.5, 23.5)
-    ax2.set_ylim(0.2, 1.05)
+    # Calculate y-axis lower limit based on perfect balance value
+    if perfect_balance_4_normalized:
+        perfect_mean_4 = np.mean([v for v in perfect_balance_4_normalized if v > 0]) if any(v > 0 for v in perfect_balance_4_normalized) else 0.2
+        y_min_4 = max(0, perfect_mean_4 - 0.1)
+    else:
+        y_min_4 = 0.2
+    ax2.set_ylim(y_min_4, 1.05)
     ax2.set_xticks(range(0, 24, 4))
     ax2.set_yticks(np.arange(0.2, 1.05, 0.2))
     ax2.grid(True, alpha=0.3, linewidth=0.8, linestyle='-')

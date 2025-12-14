@@ -31,7 +31,7 @@ def parse_filename(filename):
     """Extract config, method, layer, rank from filename"""
     # Format: token_num_log_2_FLEX_0_0.txt
     # config_num, solver_type, layer_num, rank_num
-    pattern = r'(.+)_token_counts_(.+)_(.+)_batch(\d+)_seq(\d+)_aux(.+)_layer(\d+)_rank(\d+)\.txt'
+    pattern = r'(.+)_token_counts_(.+)_(.+)_batch(\d+)_seq(\d+)_aux(.+)_layer(\d+)_(\d+)\.txt'
     match = re.match(pattern, filename)
     
     if match:
