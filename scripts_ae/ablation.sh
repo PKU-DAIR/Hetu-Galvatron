@@ -3,11 +3,6 @@ if [ $# -ne 1 ]; then
     exit 1
 fi
 
-if [ "$approach" != "LAER" ] && [ "$approach" != "no_even" ] && [ "$approach" != "no_pq" ] && [ "$approach" != "no_comm_opt" ] && [ "$approach" != "FSDP" ]; then
-    echo "Invalid approach: $approach"
-    exit 1
-fi
-
 approach=$1
 model_name=mixtral-8x7b-e8k2
 aux_loss=0
@@ -17,6 +12,11 @@ seq_length=8192
 chunk=2
 layer_num=32
 capacity=2
+
+if [ "$approach" != "LAER" ] && [ "$approach" != "no_even" ] && [ "$approach" != "no_pq" ] && [ "$approach" != "no_comm_opt" ] && [ "$approach" != "FSDP" ]; then
+    echo "Invalid approach: $approach"
+    exit 1
+fi
 
 export ABLATION_APPROACH=$approach
 export BASE_DIR=$(cd $(dirname $0)/../..; pwd)
