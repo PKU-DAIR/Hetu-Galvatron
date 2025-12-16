@@ -17,13 +17,9 @@ from megatron.core import tensor_parallel
 from megatron.training import print_rank_0, get_args
 from megatron.training.training import build_train_valid_test_data_iterators
 from megatron.training import get_tokenizer
-<<<<<<< HEAD
+
 from galvatron.core.runtime.hybrid_parallel_config import get_chunks
 from galvatron.core.runtime.pipeline.utils import chunk_batch
-=======
-from galvatron.core.hybrid_parallel_config import get_chunks
-from galvatron.core.pipeline.utils import chunk_batch
->>>>>>> 0e554e6502dab21f2e27e26454504bed37ac6828
 
 class DataLoaderForBert(Dataset):
     def __init__(self, args, device, dataset_size=64*16):
