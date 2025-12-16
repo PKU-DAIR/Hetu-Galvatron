@@ -1,11 +1,11 @@
 import torch.distributed
 import torch.nn as nn
 import torch
-from galvatron.core.pipeline import PipeSequential
-from galvatron.core import mixed_precision_dtype, ModelInfo
+from galvatron.core.runtime.pipeline import PipeSequential
+from galvatron.core.runtime import mixed_precision_dtype, ModelInfo
 from galvatron.core import get_args
 from megatron.core import tensor_parallel
-from galvatron.core.tensor_parallel import colummn_row_reset_parameters
+from galvatron.core.runtime.tensor_parallel import colummn_row_reset_parameters
 from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.core.tensor_parallel.mappings_group import get_tensor_model_parallel_world_size_group
 

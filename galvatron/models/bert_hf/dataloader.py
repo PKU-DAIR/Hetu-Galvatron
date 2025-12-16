@@ -22,7 +22,7 @@ from galvatron.core.runtime.hybrid_parallel_config import get_chunks
 from galvatron.core.runtime.pipeline.utils import chunk_batch
 =======
 from galvatron.core.hybrid_parallel_config import get_chunks
-from galvatron.core.pipeline.utils import chunk_batch
+from galvatron.core.runtime.pipeline.utils import chunk_batch
 >>>>>>> 0e554e6502dab21f2e27e26454504bed37ac6828
 
 class DataLoaderForBert(Dataset):
