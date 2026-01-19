@@ -1,5 +1,7 @@
 # LAER-MoE Artifact
 
+> **Note**: This repository contains only the LAER-MoE code. For the complete Artifact Evaluation (AE) package including all baselines, please refer to [this repository](https://github.com/Fizzmy/LAER-MoE-AE).
+
 This repo contains the actifact of paper "LAER-MoE: Load-Adaptive Expert Re-layout for Efficient Mixture-of-Experts Training", including codes and scripts for reproducing all experiments in the paper.
 
 ## Requirements
