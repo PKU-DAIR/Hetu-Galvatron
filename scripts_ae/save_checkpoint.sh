@@ -3,6 +3,8 @@ if [ $# -ne 2 ]; then
     exit 1
 fi
 
+source ./scripts_ae/env.sh
+
 model_name=$1
 type=$2
 

@@ -11,21 +11,21 @@ CSV_FILE = 'LAER-MoE/scripts_ae/e2e_analysis.csv'
 BACKUP_CSV_FILE = 'LAER-MoE/scripts_ae/e2e_analysis_backup.csv'
 COLORS = {
     'megatron': '#A23B72',
-    'NONE': '#2E86AB',
+    'FSDP': '#2E86AB',
     'FLEX': '#F18F01',
     'LAER': '#C73E1D'
 }
 
 PATTERNS = {
     'megatron': '//',
-    'NONE': '..',
+    'FSDP': '..',
     'FLEX': 'xx',
     'LAER': '\\\\'
 }
 
 METHOD_LABELS = {
     'megatron': 'Megatron',
-    'NONE': 'FSDP+EP',
+    'FSDP': 'FSDP+EP',
     'FLEX': 'FlexMoE',
     'LAER': 'LAER-MoE'
 }
@@ -40,7 +40,7 @@ DEFAULT_MODELS = [
     'mixtral-8x22b-e16k4'
 ]
 
-DEFAULT_METHODS = ['megatron', 'NONE', 'FLEX', 'LAER']
+DEFAULT_METHODS = ['megatron', 'FSDP', 'FLEX', 'LAER']
 DEFAULT_AUX_LOSS = [0, 0.0001]
 
 def load_data(csv_file):
@@ -163,14 +163,14 @@ def add_speedup_labels(ax, x_base, bar_width, megatron_time, baseline_time, solv
                 rotation=45, fontweight='bold')
         labels_added.append(True)
     
-    # Add baseline (NONE) speedup if available and non-zero
+    # Add baseline (FSDP) speedup if available and non-zero
     if baseline_time is not None and baseline_time > 0:
         baseline_speedup = baseline_time / solver_time
         # Adjust vertical position if megatron label was not added
         y_pos = y_offset_2 if (megatron_time is not None and megatron_time > 0) else y_offset_1
         ax.text(x_base + offset * bar_width, y_pos,
                 f'{baseline_speedup:.2f}x',
-                ha='left', va='bottom', fontsize=5, color=COLORS['NONE'],
+                ha='left', va='bottom', fontsize=5, color=COLORS['FSDP'],
                 rotation=45, fontweight='bold')
         labels_added.append(True)
 
@@ -204,13 +204,13 @@ def create_subplot(ax, df, dataset, aux_loss, subplot_index):
         
         # Get time data for each method
         megatron_time, megatron_std = get_time_data(data, model_name, 'megatron', aux_loss)
-        none_time, none_std = get_time_data(data, model_name, 'NONE', aux_loss)
+        none_time, none_std = get_time_data(data, model_name, 'FSDP', aux_loss)
         flex_time, flex_std = get_time_data(data, model_name, 'FLEX', aux_loss)
         laer_time, laer_std = get_time_data(data, model_name, 'LAER', aux_loss)
         
         # Plot bars
         plot_bar(ax, x_base, megatron_time, megatron_std, 'megatron', bar_width, -1.5)
-        plot_bar(ax, x_base, none_time, none_std, 'NONE', bar_width, -0.5)
+        plot_bar(ax, x_base, none_time, none_std, 'FSDP', bar_width, -0.5)
         plot_bar(ax, x_base, flex_time, flex_std, 'FLEX', bar_width, 0.5)
         plot_bar(ax, x_base, laer_time, laer_std, 'LAER', bar_width, 1.5)
         
@@ -305,7 +305,7 @@ def create_combined_chart(df):
     available_methods = set(df['method'].unique())
     
     # Create legend only for available methods, maintaining order
-    legend_order = ['megatron', 'NONE', 'FLEX', 'LAER']
+    legend_order = ['megatron', 'FSDP', 'FLEX', 'LAER']
     legend_elements = [
         Patch(facecolor=COLORS[k], hatch=PATTERNS[k], edgecolor='black', label=METHOD_LABELS[k])
         for k in legend_order if k in available_methods

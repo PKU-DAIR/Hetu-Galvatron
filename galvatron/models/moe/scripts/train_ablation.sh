@@ -4,26 +4,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # export NVTE_BATCH_MHA_P2P_COMM=1 # to force TransformerEngine to use batched send/recv for CP
 export NCCL_DEBUG=WARN
 
-ports=(`echo $METIS_WORKER_0_PORT | tr ',' ' '`)
-port=${ports[0]}
-export NUM_NODES=4
-export NUM_GPUS_PER_NODE=$ARNOLD_WORKER_GPU
-export MASTER_ADDR=$METIS_WORKER_0_HOST
-export MASTER_PORT=23456 # $port
-export NODE_RANK=`expr $ARNOLD_ID - 0`
-
-export OMP_NUM_THREADS=8
-export NCCL_DEBUG=WARN
-export NCCL_IB_HCA=mlx5_0,mlx5_1,mlx5_2,mlx5_3
-export NCCL_IB_DISABLE=0
-export NCCL_SOCKET_IFNAME=eth0
-export NCCL_IB_GID_INDEX=3
-export NCCL_NET_GDR_LEVEL=2
-
-# export NCCL_NVLS_ENABLE=1
-export GLOO_SOCKET_IFNAME=eth0
-# export CUDA_DEVICE_MAX_CONNECTIONS=1
-
 export MODEL_SIZE=$1
 export LAYER_NUM=$2
 export AUX=$3

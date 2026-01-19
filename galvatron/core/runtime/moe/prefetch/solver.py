@@ -74,7 +74,7 @@ class MoEOptimizer:
         if no_even or no_pq:
             return gb.greedy_load_balancing_heuristic(n_device, n_expert, E, C_e, no_even, no_pq)
         else:
-            return gb.greedy_load_balancing_heuristic_complete(n_device, n_expert, E, C_e, self.hidden_size * 2, 2, self.v_comp, self.V_intra, self.V_inter, self.global_checkpoint)
+            return gb.greedy_load_balancing_heuristic_complete(n_device, n_expert, E, C_e, self.hidden_size * 2, 0, self.v_comp, self.V_intra, self.V_inter, self.global_checkpoint)
 
     def flexmoe_method(self,
                        E: List[List[int]],

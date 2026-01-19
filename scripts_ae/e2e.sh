@@ -3,6 +3,8 @@ if [ $# -ne 4 ]; then
     exit 1
 fi
 
+source ./scripts_ae/env.sh
+
 approach=$1
 model_name=$2
 aux_loss=$3
