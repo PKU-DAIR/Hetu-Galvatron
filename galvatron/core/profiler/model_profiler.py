@@ -112,7 +112,14 @@ class ModelProfiler(BaseProfiler):
                         # For memory profiling, sequence lengths must be powers of 2
                         assert (1 << (args.profile_min_seq_length.bit_length() - 1)) == args.profile_min_seq_length, "profile_min_seq_length must be a power of 2"
                         assert (1 << (args.profile_max_seq_length.bit_length() - 1)) == args.profile_max_seq_length, "profile_max_seq_length must be a power of 2"
-                        seq_length_all_case = [(1 << shift) for shift in range(args.profile_min_seq_length.bit_length() - 1, args.profile_max_seq_length.bit_length() - 1)]
+                        # Include max power-of-two sequence length in memory sequence profiling.
+                        seq_length_all_case = [
+                            (1 << shift)
+                            for shift in range(
+                                args.profile_min_seq_length.bit_length() - 1,
+                                args.profile_max_seq_length.bit_length(),
+                            )
+                        ]
                     self.seq_length_tuple_list = [
                         (seq_length, ) for seq_length in seq_length_all_case
                     ]
@@ -445,7 +452,7 @@ class ModelProfiler(BaseProfiler):
                     avg_time = (val - val_base) / bsz / (
                         self.args.profile_layernum_max - self.args.profile_layernum_min
                     )
-                    write_key = f"layertype{idx}_bsz{bsz}_seq{seq[idx]}"
+                    write_key = f"layertype_{idx}_bsz{bsz}_seq{seq[idx]}"
                     config[write_key] = avg_time
                     total_avg_time.append(avg_time)
 
@@ -454,7 +461,7 @@ class ModelProfiler(BaseProfiler):
                 for idx in range(len(total_avg_time)):
                     other_time -= layernum_lists[0][idx] * total_avg_time[idx] * bsz
                 other_time /= bsz
-                write_key = f"layertypeother_bsz{bsz}_{seq_info}"
+                write_key = f"layertype_other_bsz{bsz}_{seq_info}"
                 config[write_key] = max(other_time, 0)
 
                 # Write results to config file

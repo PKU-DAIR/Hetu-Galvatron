@@ -19,5 +19,5 @@ if __name__ == '__main__':
         path=path,
         model_name=args.model_info.model_size,
     )
-    # model_profiler.launch_profiling_scripts()
+    model_profiler.launch_profiling_scripts()
     model_profiler.process_profiled_data() 
