@@ -1,7 +1,7 @@
 """Distributed training entry point for GPT.
 
 Usage:
-    torchrun ... train_dist.py scripts/train_dist.yaml [overrides...]
+  torchrun ... train_dist.py <config.yaml> [hydra overrides...]
 """
 
 import os
@@ -17,7 +17,13 @@ from galvatron.core import (
 from galvatron.core.runtime.models.builder import build_model, get_runtime_profiler
 from galvatron.core.runtime.dataloader import get_batch, get_train_valid_test_data_iterators
 from galvatron.core.runtime.utils.utils import set_megatron_args_for_dataset
+from galvatron.core.runtime.checkpoint.llama_adapter import save_llama_module
 from galvatron.core.runtime.initialize import initialize_galvatron, _print_args
+from galvatron.core.runtime.datasets.huggingface.dataloader import (
+    get_hf_train_valid_test_data_iterators,
+    is_hf_dataset_built_on_rank,
+)
+from galvatron.utils import print_loss
 from galvatron.utils.hf_config_adapter import resolve_model_config
 
 
@@ -30,8 +36,14 @@ def train(args):
     resolve_model_config(args)
     model = build_model(args)
 
+    data_source = getattr(args.data, "data_source", "megatron")
+
+    if data_source == "hf" and getattr(args.train, "use_flash_attn", False):
+        args.data.create_attention_mask_in_dataloader = False
+
     if local_rank == 0:
-        print("Creating Dataset...")
+        print("Creating dataset...")
+        _print_args(args)
 
     set_megatron_args_for_dataset(
         args,
@@ -41,9 +53,15 @@ def train(args):
         model.cp_groups_whole[0],
     )
 
-    _print_args(args)
+    if data_source == "hf":
+        if is_hf_dataset_built_on_rank():
+            train_data_iterator, valid_data_iterator, test_data_iterator = get_hf_train_valid_test_data_iterators(args)
+        else:
+            train_data_iterator, valid_data_iterator, test_data_iterator = None, None, None
+        torch.distributed.barrier()
+    else:
+        train_data_iterator, valid_data_iterator, test_data_iterator = get_train_valid_test_data_iterators()
 
-    train_data_iterator, valid_data_iterator, test_data_iterator = get_train_valid_test_data_iterators()
     optimizer, opt_param_scheduler = get_optimizer_and_param_scheduler(model, args)
 
     path = os.path.dirname(os.path.abspath(__file__))
@@ -69,6 +87,9 @@ def train(args):
 
         profiler.profile_memory(iter_idx, "After optimizer_step")
         optimizer.zero_grad()
+
+        # print_loss(args, loss, -1, iter_idx)
+
         profiler.post_profile_memory(iter_idx)
 
         lr = optimizer.param_groups[0]["lr"]

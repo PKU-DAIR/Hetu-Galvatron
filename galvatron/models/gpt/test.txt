@@ -1,0 +1,325 @@
+[2026-04-18 23:25:14,126] torch.distributed.run: [WARNING] master_addr is only used for static rdzv_backend and when rdzv_endpoint is not specified.
+[2026-04-18 23:25:14,126] torch.distributed.run: [WARNING] 
+[2026-04-18 23:25:14,126] torch.distributed.run: [WARNING] *****************************************
+[2026-04-18 23:25:14,126] torch.distributed.run: [WARNING] Setting OMP_NUM_THREADS environment variable for each process to be 1 in default, to avoid your system being overloaded, please further tune the variable for optimal performance in your application as needed. 
+[2026-04-18 23:25:14,126] torch.distributed.run: [WARNING] *****************************************
+ > padded vocab (size: 32000) with 0 dummy tokens (new size: 32000)
+> initializing torch distributed ...
+WARNING:galvatron.core.runtime.utils.rerun_state_machine:RerunStateMachine initialized in mode RerunMode.DISABLED
+> compiling dataset index builder ...
+make: Entering directory '/home/pkuhetu/lly/Hetu-Galvatron/galvatron/core/runtime/datasets/megatron'
+make: Nothing to be done for 'default'.
+make: Leaving directory '/home/pkuhetu/lly/Hetu-Galvatron/galvatron/core/runtime/datasets/megatron'
+>>> done with dataset index builder. Compilation time: 0.062 seconds
+NCCL version 2.18.5+cuda12.1
+>>> done with compiling dataset index builder. Compilation time: 5.183 seconds
+======================== Galvatron Parallel Config =============================
+Galvatron parallel config mode: [GLOBAL config mode]
+[GLOBAL config mode] Loaded global hybrid parallel strategy:
+   global_batch_size: 8, chunks: 1
+   pp_deg: 1, tp_deg: 2, dp_deg: 4, cp_deg: 1, tp_consecutive_flag: 1, checkpoint_flag: 0
+   pipeline_type: gpipe, default_dp_type: ddp, dtype: bf16
+vocab_tp: 2, vocab_sp: 0, vocab_cp: 1, vocab_sdp: 0
+   pp_division:                  [8]
+   pp_ranks:                     [0, 0, 0, 0, 0, 0, 0, 0]
+   use_sp:                       [False]
+================================================================================
+Creating Model...
+Model Layer Types:
+['embed', 'gpt_dec', 'gpt_dec', 'gpt_dec', 'gpt_dec', 'gpt_dec', 'gpt_dec', 'gpt_dec', 'gpt_dec', 'norm', 'cls']
+   tp_sizes_whole:               [2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2]
+   sp_sizes_whole:               [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   cp_sizes_whole:               [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   tp_consec_whole:              [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   dp_types_whole:               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+   pp_ranks_whole:               [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+   checkpoint_flags_whole:       [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+   ep_sizes_whole:               [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   tp_of_ep_sizes_whole:         [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+   dp_sizes_whole:               [4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]
+================================================================================
+Generating communication groups...
+====================== Galvatron Communication Group ===========================
+Embedding group for rank 0:
+[0] 
+TP groups for rank 0 (all layers):
+[0, 1] [0, 1] [0, 1] [0, 1] [0, 1] [0, 1] [0, 1] [0, 1] [0, 1] [0, 1] [0, 1] 
+SP groups for rank 0 (all layers):
+[0] [0] [0] [0] [0] [0] [0] [0] [0] [0] [0] 
+CP groups for rank 0 (all layers):
+[0] [0] [0] [0] [0] [0] [0] [0] [0] [0] [0] 
+DP groups for rank 0 (all layers):
+[0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] 
+SDP groups for rank 0 (all layers):
+[0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] [0, 2, 4, 6] 
+Split CP groups for rank 0:
+None None None None None None None None None None None 
+AllGather CP groups for rank 0:
+None None None None None None None None None None None 
+Split TP/SP/CP groups for rank 0:
+None None None None None None None None None None None 
+AllGather TP/SP/CP groups for rank 0:
+None None None None None None None None None None None 
+Fused split groups for rank 0:
+None None None None None None None None None None None 
+Fused allgather groups for rank 0:
+None None None None None None None None None None None 
+================================================================================
+Constructing TP & Sequantial model using model-specific sequential function...
+Wrapping Relocation modules if necessary...
+Constructing Pipeline Module and placing the layers on corresponding devices...
+Wrapping checkpoint based on checkpoint_flags...
+Creating dataset...
+
+=== arguments ===
+{
+  "parallel": {
+    "pp_deg": 1,
+    "global_tp_deg": 2,
+    "global_tp_consec": 1,
+    "global_cp_deg": 1,
+    "global_ep_deg": 1,
+    "global_tp_of_ep_deg": 1,
+    "global_checkpoint": 0,
+    "cp_mode": "zigzag",
+    "sdp": 0,
+    "default_dp_type": "ddp",
+    "pipeline_type": "gpipe",
+    "galvatron_config_path": null,
+    "vocab_sdp": 0,
+    "vocab_tp": 2,
+    "vocab_cp": 1,
+    "vocab_sp": 0,
+    "async_grad_reduce": true,
+    "mixed_precision": "bf16",
+    "use_ulysses": false,
+    "reduce_in_fp32": false,
+    "entropy_in_fp32": false
+  },
+  "model": {
+    "hf_model_name_or_path": null,
+    "model_config_path": "../model_configs/llama2-7b.yaml",
+    "model_type": "gpt",
+    "is_moe_model": false,
+    "set_experts_manually": 0,
+    "set_model_config_manually": 0,
+    "set_layernum_manually": 1,
+    "set_seqlen_manually": 0,
+    "initialize_on_meta": 1,
+    "shape_order": "SBH",
+    "dropout_prob": 0.0,
+    "print_loss": 0,
+    "model_size": "llama2-7b",
+    "vocab_size": 32000,
+    "padded_vocab_size": 32000,
+    "hidden_size": 4096,
+    "ffn_hidden_size": 11008,
+    "num_layers": 8,
+    "num_attention_heads": 32,
+    "num_query_groups": null,
+    "kv_channels": 128,
+    "attention_dropout": 0.0,
+    "hidden_dropout": 0.0,
+    "add_qkv_bias": false,
+    "layernorm_epsilon": 1e-05,
+    "qk_layernorm": false,
+    "position_embedding_type": "rope",
+    "rotary_base": 10000,
+    "rotary_percent": 1.0,
+    "rotary_interleaved": false,
+    "rotary_seq_len_interpolation_factor": null,
+    "mrope_section": null,
+    "make_vocab_size_divisible_by": 128,
+    "normalization": "RMSNorm",
+    "norm_epsilon": 1e-05,
+    "multi_latent_attention": false,
+    "apply_rope_fusion": true,
+    "add_bias_linear": false,
+    "bias_activation_fusion": false,
+    "activation_func_fp8_input_store": false,
+    "gated_linear_unit": true,
+    "activation_func": "<function silu at 0x7fb92b423740>",
+    "untie_embeddings_and_output_weights": false,
+    "num_moe_experts": null,
+    "moe_ffn_hidden_size": null,
+    "moe_router_topk": 2,
+    "moe_router_load_balancing_type": "aux_loss",
+    "moe_router_score_function": "softmax",
+    "moe_router_pre_softmax": false,
+    "moe_router_topk_scaling_factor": null,
+    "moe_router_num_groups": null,
+    "moe_router_group_topk": null,
+    "moe_router_enable_expert_bias": false,
+    "moe_router_dtype": null,
+    "deterministic_mode": false,
+    "moe_aux_loss_coeff": 0.0,
+    "moe_z_loss_coeff": null,
+    "moe_token_dispatcher_type": "allgather",
+    "moe_expert_capacity_factor": null,
+    "moe_pad_expert_input_to_capacity": false,
+    "moe_token_drop_policy": "probs",
+    "moe_input_jitter_eps": null,
+    "moe_permute_fusion": true,
+    "moe_enable_deepep": false,
+    "moe_shared_expert_intermediate_size": null,
+    "moe_shared_expert_overlap": false,
+    "calculate_per_token_loss": false,
+    "params_dtype": "torch.float32",
+    "gradient_accumulation_fusion": false,
+    "defer_embedding_wgrad_compute": false,
+    "wgrad_deferral_limit": 0
+  },
+  "profile": {
+    "profile": 1,
+    "profile_mode": "static",
+    "profile_unit": "all",
+    "profile_forward": 0,
+    "save_profiled_memory": 0,
+    "exit_after_profiling": 1
+  },
+  "train": {
+    "seed": 42,
+    "iteration": 0,
+    "train_iters": 2,
+    "train_samples": null,
+    "consumed_train_samples": 0,
+    "eval_iters": 1,
+    "eval_interval": 1000,
+    "consumed_valid_samples": 0,
+    "skip_train": false,
+    "do_train": false,
+    "do_valid": false,
+    "do_test": false,
+    "dataloader_type": "single",
+    "num_workers": 2,
+    "data_sharding": false,
+    "lr": 0.0006,
+    "min_lr": 6e-05,
+    "lr_decay_style": "cosine",
+    "lr_warmup_fraction": 0.1,
+    "lr_warmup_iters": 0,
+    "lr_warmup_samples": 0,
+    "lr_warmup_init": 0.0,
+    "lr_decay_iters": null,
+    "lr_decay_samples": null,
+    "lr_wsd_decay_style": "exponential",
+    "lr_wsd_decay_iters": null,
+    "lr_wsd_decay_samples": null,
+    "weight_decay": 0.1,
+    "start_weight_decay": 0.1,
+    "end_weight_decay": 0.1,
+    "weight_decay_incr_style": "constant",
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.95,
+    "adam_eps": 1e-08,
+    "init_method_std": 0.02,
+    "use_checkpoint_opt_param_scheduler": false,
+    "override_opt_param_scheduler": false,
+    "sequence_parallel": true,
+    "use_flash_attn": true,
+    "global_batch_size": 8,
+    "micro_batch_size": 1,
+    "chunks": 1,
+    "rampup_batch_size": null,
+    "seq_length": 1024,
+    "clip_grad": 1.0,
+    "flash_decode": true,
+    "test_mode": false
+  },
+  "data": {
+    "data_path": null,
+    "split": null,
+    "train_data_path": [
+      "/home/pkuhetu/lly/dataset/fineweb_10BT/data/CC-MAIN-2013-20"
+    ],
+    "valid_data_path": null,
+    "test_data_path": null,
+    "data_source": "hf",
+    "hf_text_keys": "text",
+    "hf_collator_mode": "padding",
+    "hf_shuffle_buffer_size": 0,
+    "hf_num_workers": 4,
+    "hf_prefetch_factor": 2,
+    "hf_data_mode": "prefetch",
+    "data_args_path": null,
+    "per_split_data_args_path": null,
+    "tokenizer_type": "HuggingFaceTokenizer",
+    "tokenizer_model": "/home/pkuhetu/lly/WorkSpace/ckpt/llama/llama2-7b-chat-hf",
+    "shared_storage": true,
+    "num_dataset_builder_threads": 1,
+    "data_cache_path": null,
+    "mmap_bin_files": true,
+    "s3_cache_path": null,
+    "reset_position_ids": false,
+    "reset_attention_mask": false,
+    "eod_mask_loss": false,
+    "create_attention_mask_in_dataloader": false
+  },
+  "ckpt": {
+    "load": null,
+    "load_iteration": 0,
+    "distributed_checkpoint": false,
+    "save": null,
+    "save_interval": null
+  },
+  "logging": {
+    "tensorboard_dir": null,
+    "tensorboard_queue_size": 1000,
+    "wandb_project": "",
+    "wandb_exp_name": "",
+    "wandb_save_dir": ""
+  },
+  "rank": 0,
+  "world_size": 8,
+  "local_rank": 0,
+  "distributed_backend": "nccl",
+  "distributed_timeout_minutes": 10
+}
+
+After creating model [Allocated]
+After creating model [Allocated]
+	Max memory: 3838.27 MB	Current memory : 3588.27 MB
+Start training...
+	Max memory: 3838.27 MB	Current memory : 3588.27 MB
+NCCL version 2.18.5+cuda12.1
+NCCL version 2.18.5+cuda12.1
+NCCL version 2.18.5+cuda12.1
+
+Before Forward [Allocated]
+	Max memory: 3588.33 MB	Current memory : 3588.33 MB
+
+Before Forward [Allocated]
+	Max memory: 3588.33 MB	Current memory : 3588.33 MB
+NCCL version 2.18.5+cuda12.1
+After Forward [Allocated]
+	Max memory: 5147.66 MB	Current memory : 4960.13 MB
+After Forward [Allocated]
+	Max memory: 5147.66 MB	Current memory : 4960.13 MB
+After Backward [Allocated]
+After Backward [Allocated]
+	Max memory: 7337.85 MB	Current memory : 7212.85 MB
+	Max memory: 7337.85 MB	Current memory : 7212.85 MB
+After optimizer_step [Allocated]
+	Max memory: 14389.38 MB	Current memory : 14389.38 MB
+| Iteration:      1 | Consumed samples:            8 | Elapsed time per iteration (ms): 38199.6 | Learning rate: 3.768850e-04 | Loss: 1.124584e+01 | grad norm: 28.68 |
+After optimizer_step [Allocated]
+	Max memory: 14389.38 MB	Current memory : 14389.38 MB
+
+Before Forward [Allocated]
+	Max memory: 10801.12 MB	Current memory : 10801.12 MB
+
+Before Forward [Allocated]
+	Max memory: 10801.12 MB	Current memory : 10801.12 MB
+After Forward [Allocated]
+	Max memory: 12332.33 MB	Current memory : 12144.80 MB
+After Forward [Allocated]
+	Max memory: 12332.33 MB	Current memory : 12144.80 MB
+After Backward [Allocated]
+	Max memory: 14582.40 MB	Current memory : 14389.38 MB
+After Backward [Allocated]
+	Max memory: 14582.40 MB	Current memory : 14389.38 MB
+After optimizer_stepAfter optimizer_step  [Allocated][Allocated]
+
+	Max memory: 14582.40 MB	Current memory : 14389.38 MB
+	Max memory: 14582.40 MB	Current memory : 14389.38 MB
+| Iteration:      2 | Consumed samples:           16 | Elapsed time per iteration (ms): 310.6 | Learning rate: 6.000000e-05 | Loss: 1.118678e+01 | grad norm: 28.48 |
