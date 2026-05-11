@@ -10,8 +10,8 @@ from galvatron.core.runtime.datasets.huggingface.utils import (
     split_into_chunks,
 )
 from galvatron.core.runtime.parallel_state import (
-    get_vocab_data_parallel_world_size as get_data_parallel_world_size,
-    get_vocab_data_parallel_rank as get_data_parallel_rank,
+    get_vocab_dp_world_size as get_data_parallel_world_size,
+    get_vocab_dp_rank as get_data_parallel_rank,
 )
 
 FIXED_DATA_SHARD_COUNT = 8
@@ -136,8 +136,16 @@ def build_hf_iterable_dataset(
     dp_world_size = get_data_parallel_world_size()
     if dp_world_size > 1:
         dp_rank = get_data_parallel_rank()
-        # shard by files and by examples, not only by examples
-        dataset = dataset.shard(num_shards=dp_world_size, index=dp_rank)
+        # Some datasets versions return a streaming IterableDataset without
+        # `.shard()`. Keep compatibility by falling back to round-robin sharding.
+        if hasattr(dataset, "shard"):
+            dataset = dataset.shard(num_shards=dp_world_size, index=dp_rank)
+        else:
+            dataset = HFStreamingShardDataset(
+                data=dataset,
+                dp_rank=dp_rank,
+                dp_world_size=dp_world_size,
+            )
 
     return HFIterableDataset(
         data=dataset,
@@ -184,7 +192,16 @@ def build_hf_streaming_dataset(
     if dp_rank is None or dp_world_size is None:
         return dataset
 
-    # Single local file can fail inside dataset.shard due to empty gen_kwargs_list
+    # Some datasets versions expose no `.shard()` on streaming IterableDataset.
+    # In that case, use round-robin sharding for all sources.
+    if not hasattr(dataset, "shard"):
+        return HFStreamingShardDataset(
+            data=dataset,
+            dp_rank=dp_rank,
+            dp_world_size=dp_world_size,
+        )
+
+    # Single local file can fail inside dataset.shard due to empty gen_kwargs_list.
     if len(data_files) == 1:
         return HFStreamingShardDataset(
             data=dataset,

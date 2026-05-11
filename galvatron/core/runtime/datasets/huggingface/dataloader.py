@@ -19,7 +19,7 @@ def is_hf_dataset_built_on_rank():
     """True on ranks that should construct HF data iterators (PP first/last + vocab-TP rank 0)."""
     return (
         parallel_state.is_pipeline_first_stage() or parallel_state.is_pipeline_last_stage()
-    ) and parallel_state.get_vocab_tensor_parallel_rank() == 0
+    ) and parallel_state.get_vocab_tp_sp_rank() == 0
 
 
 def get_hf_train_valid_test_data_iterators(args):
@@ -38,8 +38,8 @@ def get_hf_train_valid_test_data_iterators(args):
     Mode: ``args.data.hf_data_mode`` — ``prefetch`` | ``iterable`` | ``mapping``.
     """
     mode = getattr(args.data, "hf_data_mode", "prefetch")
-    dp_world_size = parallel_state.get_vocab_data_parallel_world_size()
-    dp_rank = parallel_state.get_vocab_data_parallel_rank()
+    dp_world_size = parallel_state.get_vocab_dp_world_size()
+    dp_rank = parallel_state.get_vocab_dp_rank()
     batch_size = args.train.global_batch_size // dp_world_size
     text_keys = args.data.hf_text_keys or "text"
     shuffle_buffer = getattr(args.data, "hf_shuffle_buffer_size", 0) or 0

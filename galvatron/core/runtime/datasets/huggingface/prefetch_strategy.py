@@ -15,8 +15,8 @@ from galvatron.core.runtime.datasets.huggingface.utils import (
 from galvatron.core.runtime.parallel_state import (
     get_args,
     get_tokenizer,
-    get_vocab_data_parallel_world_size as get_data_parallel_world_size,
-    get_vocab_data_parallel_rank as get_data_parallel_rank,
+    get_vocab_dp_world_size as get_data_parallel_world_size,
+    get_vocab_dp_rank as get_data_parallel_rank,
 )
 from galvatron.core.runtime.datasets.huggingface.dataset import build_hf_streaming_dataset
 from galvatron.core.runtime.datasets.huggingface.collator import (
