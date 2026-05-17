@@ -57,7 +57,7 @@ def train(args):
 
     path = os.path.dirname(os.path.abspath(__file__))
     start_iter = args.train.iteration
-    end_iter = max(start_iter + 1, args.train.train_iters - 1)
+    end_iter = max(start_iter + 1, args.train.train_iters)
     profiler = get_runtime_profiler(args, path, start_iter=start_iter, end_iter=end_iter)
     profiler.profile_memory(0, "After creating model")
 

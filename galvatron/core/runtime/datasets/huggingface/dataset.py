@@ -10,8 +10,8 @@ from galvatron.core.runtime.datasets.huggingface.utils import (
     split_into_chunks,
 )
 from galvatron.core.runtime.parallel_state import (
-    get_vocab_data_parallel_world_size as get_data_parallel_world_size,
-    get_vocab_data_parallel_rank as get_data_parallel_rank,
+    get_vocab_dp_world_size as get_data_parallel_world_size,
+    get_vocab_dp_rank as get_data_parallel_rank,
 )
 
 FIXED_DATA_SHARD_COUNT = 8

@@ -43,7 +43,7 @@ runtime:
     print_loss: 0
     model_size: llama2-7b
     model_config_path: ${paths.model_config_path}
-    num_layers: 8
+    num_layers: 4
 
   profile:
     profile: 1
@@ -54,7 +54,7 @@ runtime:
     exit_after_profiling: 1
 
   train:
-    train_iters: 2
+    train_iters: 20
     eval_iters: 1
     lr: 6.0e-4
     min_lr: 6.0e-5
@@ -67,7 +67,7 @@ runtime:
     init_method_std: 0.02
     sequence_parallel: true
     use_flash_attn: true
-    global_batch_size: 8
+    global_batch_size: 32
     micro_batch_size: 1
     chunks: 1
     seq_length: 1024
