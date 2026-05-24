@@ -9,31 +9,11 @@ import logging
 import torch
 from torch import Tensor
 
-from galvatron.core.runtime import parallel_state
 from galvatron.core.runtime.args_schema import GalvatronModelArgs
 from galvatron.core.runtime.utils.utils import is_te_min_version
+from galvatron.core.runtime.parallel_state import get_parallel_world_size, get_parallel_rank
 
 logger = logging.getLogger(__name__)
-
-# Prefer fused RoPE from Apex as we need the `transpose_output_memory` argument for the bshd trick.
-# See https://gitlab-master.nvidia.com/ADLR/megatron-lm/-/merge_requests/2469.
-try:
-    from apex.transformer.functional import fused_apply_rotary_pos_emb
-except ImportError:
-    try:
-        from galvatron.core.runtime.transformer.fused_kernels import fused_apply_rotary_pos_emb
-    except:
-        fused_apply_rotary_pos_emb = None
-
-
-try:
-    from galvatron.core.runtime.transformer.fused_kernels import fused_apply_rotary_pos_emb_thd
-except ImportError:
-    try:
-        from apex.transformer.functional import fused_apply_rotary_pos_emb_thd
-    except ImportError:
-        fused_apply_rotary_pos_emb_thd = None
-
 
 try:
     from flash_attn.layers.rotary import apply_rotary_emb as apply_rotary_emb_flash
@@ -41,18 +21,27 @@ except ImportError:
     apply_rotary_emb_flash = None
 
 
+# Galvatron's in-tree fused RoPE CUDA kernel. Build on demand via:
+#   cd galvatron/core/runtime/transformer/fused_rope && python setup.py build_ext --inplace
+try:
+    from galvatron.core.runtime.transformer.fused_rope import FusedRoPEFunc as _GalvatronFusedRoPEFunc
+except ImportError:
+    _GalvatronFusedRoPEFunc = None
+
+
 __all__ = ['apply_rotary_emb_flash']
 
-
-def get_pos_emb_on_this_cp_rank(pos_emb: Tensor, seq_dim: int) -> Tensor:
+def get_pos_emb_on_this_cp_rank(
+    pos_emb: Tensor, seq_dim: int, cp_group: Optional[torch.distributed.ProcessGroup] = None
+) -> Tensor:
     """Get the position embedding on the current context parallel rank.
 
     Args:
         pos_emb (Tensor): Positional embedding tensor
         seq_dim (int): Sequence dimension
     """
-    cp_size = parallel_state.get_vocab_cp_world_size()
-    cp_rank = parallel_state.get_vocab_cp_rank()
+    cp_size = 1 if cp_group is None else get_parallel_world_size(cp_group)
+    cp_rank = 0 if cp_group is None else get_parallel_rank(cp_group)
     cp_idx = torch.tensor(
         [cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True
     ).cuda(non_blocking=True)
@@ -61,6 +50,27 @@ def get_pos_emb_on_this_cp_rank(pos_emb: Tensor, seq_dim: int) -> Tensor:
     )
     pos_emb = pos_emb.index_select(seq_dim, cp_idx)
     pos_emb = pos_emb.view(*pos_emb.shape[:seq_dim], -1, *pos_emb.shape[(seq_dim + 2) :])
+    return pos_emb
+
+
+def get_pos_emb_on_this_cp_sp_rank(
+    pos_emb: Tensor,
+    seq_dim: int,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    sp_group: Optional[torch.distributed.ProcessGroup] = None,
+) -> Tensor:
+    """Select this rank's CP zigzag shard and sequence-parallel shard."""
+    cp_size = 1 if cp_group is None else get_parallel_world_size(cp_group)
+    if cp_size > 1:
+        pos_emb = get_pos_emb_on_this_cp_rank(pos_emb, seq_dim, cp_group)
+
+    sp_size = 1 if sp_group is None else get_parallel_world_size(sp_group)
+    if sp_size > 1:
+        sp_rank = 0 if sp_group is None else get_parallel_rank(sp_group)
+        seq_len = pos_emb.shape[seq_dim]
+        sp_seq_len = seq_len // sp_size
+        sp_start = sp_rank * sp_seq_len
+        pos_emb = pos_emb.narrow(seq_dim, sp_start, sp_seq_len).contiguous()
     return pos_emb
 
 
@@ -120,18 +130,29 @@ def _apply_rotary_pos_emb_bshd(
     return torch.cat((t, t_pass), dim=-1)
 
 
-def _get_thd_freqs_on_this_cp_rank(cp_rank: int, cp_size: int, x: Tensor, freqs: Tensor) -> Tensor:
+def _get_thd_freqs_on_this_cp_rank(
+    cp_rank: int,
+    cp_size: int,
+    cp_seq_len: int,
+    freqs: Tensor,
+    offset: int = 0,
+) -> Tensor:
     if cp_size > 1:
-        cp_seg = x.size(0) // 2
-        full_seqlen = cp_size * x.size(0)
+        cp_seg = cp_seq_len // 2
+        full_seqlen = cp_size * cp_seq_len
         return torch.cat(
             [
-                freqs[cp_rank * cp_seg : (cp_rank + 1) * cp_seg],
-                freqs[full_seqlen - (cp_rank + 1) * cp_seg : full_seqlen - cp_rank * cp_seg],
+                freqs[offset + cp_rank * cp_seg : offset + (cp_rank + 1) * cp_seg],
+                freqs[
+                    offset
+                    + full_seqlen
+                    - (cp_rank + 1) * cp_seg : offset
+                    + full_seqlen
+                    - cp_rank * cp_seg
+                ],
             ]
         )
-    else:
-        return freqs[: x.size(0)]
+    return freqs[offset : offset + cp_seq_len]
 
 
 def _apply_rotary_pos_emb_thd(
@@ -141,6 +162,8 @@ def _apply_rotary_pos_emb_thd(
     rotary_interleaved: bool = False,
     multi_latent_attention: bool = False,
     mscale: float = 1.0,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    sp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> Tensor:
     """A baseline implementation of applying RoPE for `thd` format.
 
@@ -154,23 +177,31 @@ def _apply_rotary_pos_emb_thd(
         Tensor: Shape [t, h, d]. The input tensor after applying RoPE.
     """
 
-    cp_size = parallel_state.get_vocab_cp_world_size()
-    cp_rank = parallel_state.get_vocab_cp_rank()
-    cu_seqlens = cu_seqlens // cp_size
-    seqlens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+    cp_size = 1 if cp_group is None else get_parallel_world_size(cp_group)
+    cp_rank = 0 if cp_group is None else get_parallel_rank(cp_group)
+    sp_size = 1 if sp_group is None else get_parallel_world_size(sp_group)
+    sp_rank = 0 if sp_group is None else get_parallel_rank(sp_group)
+    cp_seqlens = ((cu_seqlens[1:] - cu_seqlens[:-1]) // cp_size).tolist()
 
-    return torch.cat(
+    freqs_packed = torch.cat(
         [
-            _apply_rotary_pos_emb_bshd(
-                x.unsqueeze(1),
-                _get_thd_freqs_on_this_cp_rank(cp_rank, cp_size, x, freqs),
-                rotary_interleaved=rotary_interleaved,
-                multi_latent_attention=multi_latent_attention,
-                mscale=mscale,
-            )
-            for x in torch.split(t, seqlens)
-        ]
-    ).squeeze(1)
+            _get_thd_freqs_on_this_cp_rank(cp_rank, cp_size, cp_seq_len, freqs)
+            for cp_seq_len in cp_seqlens
+        ],
+        dim=0,
+    )
+
+    if sp_size > 1:
+        sp_seq_len = freqs_packed.size(0) // sp_size
+        freqs_packed = freqs_packed.narrow(0, sp_rank * sp_seq_len, sp_seq_len).contiguous()
+
+    return _apply_rotary_pos_emb_bshd(
+        t.unsqueeze(1), # [t, h, d] -> [t, 1, h, d]
+        freqs_packed,
+        rotary_interleaved=rotary_interleaved,
+        multi_latent_attention=multi_latent_attention,
+        mscale=mscale,
+    ).squeeze(1) # [t, 1, h, d] -> [t, h, d]
 
 # TODO: support fine grained CP group size
 def apply_rotary_pos_emb(
@@ -179,43 +210,36 @@ def apply_rotary_pos_emb(
     config: GalvatronModelArgs,
     cu_seqlens: Optional[Tensor] = None,
     mscale: float = 1.0,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    sp_group: Optional[torch.distributed.ProcessGroup] = None,
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
-    fused/unfused kernels, or bshd (conventional) / thd (packed seq) format
+    fused/unfused kernels, or bshd / thd tensor format
     """
 
     if config.apply_rope_fusion:
-        if cu_seqlens is None:
-            # NOTE: TE backends do not support mRoPE in bshd format when bs > 1
-            if config.mrope_section is not None and freqs.shape[1] > 1:
-                return _apply_rotary_pos_emb_bshd(
-                    t,
-                    freqs,
-                    rotary_interleaved=config.rotary_interleaved,
-                    multi_latent_attention=config.multi_latent_attention,
-                    mscale=mscale,
-                )
-            else:
-                assert fused_apply_rotary_pos_emb is not None, "apply_rope_fusion is not available."
-                return fused_apply_rotary_pos_emb(t, freqs, transpose_output_memory=True)
-        else:
-            assert fused_apply_rotary_pos_emb_thd is not None, "apply_rope_fusion is not available."
-            cp_size = parallel_state.get_vocab_cp_world_size()
-            if cp_size > 1:
-                if not is_te_min_version("1.11.0", check_equality=False):
-                    raise ValueError("Only TE >= 1.12 supports RoPE fusion for THD format with CP.")
-                return fused_apply_rotary_pos_emb_thd(
-                    t,
-                    cu_seqlens,
-                    freqs,
-                    cp_size=cp_size,
-                    cp_rank=parallel_state.get_vocab_cp_rank(),
-                )
-            else:
-                return fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs)
+        assert _GalvatronFusedRoPEFunc is not None, (
+            "config.apply_rope_fusion=True but the in-tree fused RoPE kernel is not built. "
+            "Build it via: cd galvatron/core/runtime/transformer/fused_rope && "
+            "python setup.py build_ext --inplace"
+        )
+        assert not config.rotary_interleaved, "fused RoPE: rotary_interleaved not supported"
+        assert not config.multi_latent_attention, "fused RoPE: multi_latent_attention not supported"
+        assert mscale == 1.0, "fused RoPE: mscale != 1.0 not supported"
+
+        cp_size = 1 if cp_group is None else get_parallel_world_size(cp_group)
+        cp_rank = 0 if cp_group is None else get_parallel_rank(cp_group)
+        sp_size = 1 if sp_group is None else get_parallel_world_size(sp_group)
+        sp_rank = 0 if sp_group is None else get_parallel_rank(sp_group)
+
+        tensor_format = "thd" if cu_seqlens is not None else "sbhd"
+        return _GalvatronFusedRoPEFunc.apply(
+            t, freqs, tensor_format, cu_seqlens, cp_size, cp_rank, sp_size, sp_rank
+        )
     else:
         if cu_seqlens is None:
+            freqs = get_pos_emb_on_this_cp_sp_rank(freqs, 0, cp_group, sp_group)
             return _apply_rotary_pos_emb_bshd(
                 t,
                 freqs,
@@ -231,11 +255,18 @@ def apply_rotary_pos_emb(
                 rotary_interleaved=config.rotary_interleaved,
                 multi_latent_attention=config.multi_latent_attention,
                 mscale=mscale,
+                cp_group=cp_group,
+                sp_group=sp_group,
             )
 
 
 def apply_rotary_pos_emb_with_cos_sin(
-    t: Tensor, cos: Tensor, sin: Tensor, rotary_interleaved: bool = False
+    t: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    rotary_interleaved: bool = False,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
+    sp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> Tensor:
     """
     This function applies rotary positional embedding to the target tensor t

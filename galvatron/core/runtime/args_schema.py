@@ -293,7 +293,7 @@ class CommonDataArgs(BaseModel):
         description="Weight-prefix list for an independent test dataset.",
     )
 
-    data_source: Literal["megatron", "hf"] = Field(
+    data_source: Literal["megatron", "hf", "dummy"] = Field(
         default="megatron",
         description="Choice of training data pipeline.",
     )
@@ -310,6 +310,11 @@ class CommonDataArgs(BaseModel):
                     "Accepts: (1) prefetch (multiprocess buffer), (2) iterable (streaming + DataLoader), "
                     "(3) mapping (materialized HFDataset + DataLoader).",
     )
+
+    # Dummy data args
+    dummy_sample_mode: Literal["fix_length", "varlen_length"] = Field(default="fix_length", description="Mode for generating dummy samples.")
+    dummy_collate_mode: Literal["pack", "padding"] = Field(default="padding", description="Collation mode for dummy data.")
+    
 
     @field_validator("data_path", "train_data_path", "valid_data_path", "test_data_path", mode="before")
     @classmethod

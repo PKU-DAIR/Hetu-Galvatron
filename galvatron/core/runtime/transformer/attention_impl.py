@@ -52,7 +52,7 @@ class FlashSelfOrCrossAttention(torch.nn.Module):
             raise ImportError("einops is not installed, please install with pip install einops")
 
 
-    def forward(self, q, k, v):
+    def forward(self, q, k, v, cu_seqlens_q=None, cu_seqlens_k=None):
         """Implements the multihead softmax attention.
         Arguments
         ---------
@@ -66,15 +66,23 @@ class FlashSelfOrCrossAttention(torch.nn.Module):
         seqlen_k = k.shape[1]
 
         q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
-        cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q.device)
 
-        is_causal = self.causal
-        if seqlen_k == seqlen_q:
-            cu_seqlens_k = cu_seqlens_q
+        if cu_seqlens_q is not None:
+            assert cu_seqlens_k is not None, "cu_seqlens_q and cu_seqlens_k should be both provided or both None"
+            cu_seqlens_q = cu_seqlens_q
+            cu_seqlens_k = cu_seqlens_k
+            is_causal = self.causal
         else:
-            cu_seqlens_k = torch.arange(
-                0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k.device
-            )
+            cu_seqlens_q = torch.arange(0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q.device)
+
+            is_causal = self.causal
+            if seqlen_k == seqlen_q:
+                cu_seqlens_k = cu_seqlens_q
+            else:
+                cu_seqlens_k = torch.arange(
+                    0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=k.device
+                )
+                
         if self.training:
             dropout_p = self.dropout_p
         else:
