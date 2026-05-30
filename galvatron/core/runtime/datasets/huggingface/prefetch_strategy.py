@@ -19,10 +19,7 @@ from galvatron.core.runtime.parallel_state import (
     get_vocab_dp_rank as get_data_parallel_rank,
 )
 from galvatron.core.runtime.datasets.huggingface.dataset import build_hf_streaming_dataset
-from galvatron.core.runtime.datasets.huggingface.collator import (
-    hf_packing_loss_func,
-    get_collate_fn,
-)
+from galvatron.core.runtime.datasets.huggingface.collator import get_collate_fn
 
 _STOP_SIGNAL = None
 _g_tokenizer = None
@@ -77,9 +74,9 @@ class PrefetchBuffer:
 
         if self.mode == self.MODE_PADDING:
             entry = {
-                "tokens": torch.zeros(bs, sl, dtype=torch.long),
+                "input_ids": torch.zeros(bs, sl, dtype=torch.long),
                 "labels": torch.zeros(bs, sl, dtype=torch.long),
-                "loss_mask": torch.zeros(bs, sl, dtype=torch.float),
+                "loss_masks": torch.zeros(bs, sl, dtype=torch.float),
                 "position_ids": torch.zeros(bs, sl, dtype=torch.long),
                 "valid_lens": torch.zeros(bs, dtype=torch.long),
             }
@@ -88,6 +85,7 @@ class PrefetchBuffer:
             entry = {
                 "input_ids": torch.zeros(1, max_packed, dtype=torch.long),
                 "labels": torch.zeros(1, max_packed, dtype=torch.long),
+                "loss_masks": torch.zeros(1, max_packed, dtype=torch.float),
                 "cu_seqlens": torch.zeros(bs + 1, dtype=torch.int32),
             }
 
@@ -98,10 +96,10 @@ class PrefetchBuffer:
     def write_padding(self, entry_idx: int, batch: dict, valid_lens: Tensor) -> int:
         """Copy a PaddingCollator dict into entry_idx"""
         entry = self.entries[entry_idx]
-        actual_bs = batch["tokens"].size(0)
-        entry["tokens"][:actual_bs].copy_(batch["tokens"])
+        actual_bs = batch["input_ids"].size(0)
+        entry["input_ids"][:actual_bs].copy_(batch["input_ids"])
         entry["labels"][:actual_bs].copy_(batch["labels"])
-        entry["loss_mask"][:actual_bs].copy_(batch["loss_mask"])
+        entry["loss_masks"][:actual_bs].copy_(batch["loss_masks"])
         entry["position_ids"][:actual_bs].copy_(batch["position_ids"])
         entry["valid_lens"][:actual_bs].copy_(valid_lens)
         return actual_bs
@@ -110,9 +108,9 @@ class PrefetchBuffer:
         """Clone a padding batch from entry_idx"""
         entry = self.entries[entry_idx]
         result = {
-            "tokens": entry["tokens"][:actual_bs].clone(),
+            "input_ids": entry["input_ids"][:actual_bs].clone(),
             "labels": entry["labels"][:actual_bs].clone(),
-            "loss_mask": entry["loss_mask"][:actual_bs].clone(),
+            "loss_masks": entry["loss_masks"][:actual_bs].clone(),
             "position_ids": entry["position_ids"][:actual_bs].clone(),
         }
         if not self.use_flash_attn:
@@ -137,32 +135,27 @@ class PrefetchBuffer:
 
     def write_packing(self, entry_idx: int, batch: tuple) -> Tuple[int, int]:
         """Copy a PackingCollator tuple into entry_idx"""
+        packed_len = batch["input_ids"].size(1)
+        num_seqs = batch["cu_seqlens"].size(0)
+
         entry = self.entries[entry_idx]
-        input_ids, kwargs, _ = batch
-        labels = kwargs["labels"]
-        cu_seqlens = kwargs["cu_seqlens"]
+        entry["input_ids"][:, :packed_len].copy_(batch["input_ids"])
+        entry["labels"][:, :packed_len].copy_(batch["labels"])
+        entry["loss_masks"][:, :packed_len].copy_(batch["loss_masks"])
+        entry["cu_seqlens"][:num_seqs].copy_(batch["cu_seqlens"])
 
-        packed_len = input_ids.size(1)
-        num_seqs = cu_seqlens.size(0)
-
-        entry["input_ids"][:, :packed_len].copy_(input_ids)
-        entry["labels"][:, :packed_len].copy_(labels)
-        entry["cu_seqlens"][:num_seqs].copy_(cu_seqlens)
         return packed_len, num_seqs
 
     def read_packing(self, entry_idx: int, packed_len: int, num_seqs: int) -> tuple:
         """Clone a packing batch from entry_idx"""
         entry = self.entries[entry_idx]
-        return (
-            entry["input_ids"][:, :packed_len].clone(),
-            {
-                "cu_seqlens": entry["cu_seqlens"][:num_seqs].clone(),
-                "attention_mask": None,
-                "labels": entry["labels"][:, :packed_len].clone(),
-                "rotary_embedding": None,
-            },
-            hf_packing_loss_func,
-        )
+        result = {
+            "input_ids": entry["input_ids"][:, :packed_len].clone(),
+            "labels": entry["labels"][:, :packed_len].clone(),
+            "loss_masks": entry["loss_masks"][:, :packed_len].clone(),
+            "cu_seqlens": entry["cu_seqlens"][:num_seqs].clone(),
+        }
+        return result
 
 
 def _build_chunk_iterator(

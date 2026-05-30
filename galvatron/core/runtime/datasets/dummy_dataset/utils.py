@@ -73,6 +73,20 @@ def text_loss_func(label:List, ce_loss: List[torch.Tensor], micro_loss_masks: Li
 
 
 def get_text_batch_on_this_tp_rank(data_iterator):
+    """
+    TP broadcast for text batches. Handles three batch shapes:
+
+    - padding mode: ``cu_seqlens`` is None.
+    - pack mode (fixed micro-batch count): ``cu_seqlens`` present, no
+      ``cu_seqlens_chunks``.
+    - dyn_bsz pack mode: both ``cu_seqlens`` and ``cu_seqlens_chunks`` present;
+      ``cu_seqlens_chunks`` marks micro-batch (chunk) boundaries into
+      ``cu_seqlens``.
+
+    Metadata is broadcast as a 4-tuple ``[B, T, num_samples, num_chunks_plus_1]``,
+    where ``num_samples == 0`` signals padding mode and
+    ``num_chunks_plus_1 == 0`` signals "no cu_seqlens_chunks".
+    """
     # Middle PP stages don't need the raw batch.
     assert (
         parallel_state.is_pipeline_first_stage() or parallel_state.is_pipeline_last_stage()
@@ -83,37 +97,51 @@ def get_text_batch_on_this_tp_rank(data_iterator):
     src_rank = parallel_state.get_vocab_tp_sp_src_rank()  # global rank of TP-SP rank 0
 
     # Step 1: src rank reads data and packs shape metadata.
-    # shape_meta = [B, T, num_samples]; num_samples == 0 signals padding mode (no cu_seqlens).
     if tp_rank == 0:
         batch = next(data_iterator)
         input_ids = batch["input_ids"].cuda(non_blocking=True)
         labels = batch["labels"].cuda(non_blocking=True)
         loss_masks = batch["loss_masks"].cuda(non_blocking=True)
         B, T = batch["input_ids"].shape
-        cu_seqlens = batch["cu_seqlens"]
+        cu_seqlens = batch.get("cu_seqlens")
         if cu_seqlens is None:
             num_samples = 0
         else:
             cu_seqlens = cu_seqlens.cuda(non_blocking=True)
             num_samples = cu_seqlens.numel() - 1
-        shape_meta = torch.tensor([B, T, num_samples], dtype=torch.long).cuda(non_blocking=True)
+        cu_seqlens_chunks = batch.get("cu_seqlens_chunks")
+        if cu_seqlens_chunks is None:
+            num_chunks_plus_1 = 0
+        else:
+            cu_seqlens_chunks = cu_seqlens_chunks.cuda(non_blocking=True)
+            num_chunks_plus_1 = cu_seqlens_chunks.numel()
+        shape_meta = torch.tensor(
+            [B, T, num_samples, num_chunks_plus_1], dtype=torch.long
+        ).cuda(non_blocking=True)
     else:
-        shape_meta = torch.empty(3, dtype=torch.long).cuda(non_blocking=True)
+        shape_meta = torch.empty(4, dtype=torch.long).cuda(non_blocking=True)
 
     # Step 2: broadcast shape.
     dist.broadcast(shape_meta, src=src_rank, group=tp_group)
-    B, T, num_samples = shape_meta.tolist()
+    B, T, num_samples, num_chunks_plus_1 = shape_meta.tolist()
     has_cu_seqlens = num_samples > 0
+    has_cu_seqlens_chunks = num_chunks_plus_1 > 0
 
     # Step 3: non-src ranks allocate receive buffers.
     if tp_rank != 0:
         input_ids = torch.empty((B, T), dtype=torch.long).cuda(non_blocking=True)
         labels = torch.empty((B, T), dtype=torch.long).cuda(non_blocking=True)
         loss_masks = torch.empty((B, T), dtype=torch.float32).cuda(non_blocking=True)
-        if has_cu_seqlens:
-            cu_seqlens = torch.empty(num_samples + 1, dtype=torch.int32).cuda(non_blocking=True)
-        else:
-            cu_seqlens = None
+        cu_seqlens = (
+            torch.empty(num_samples + 1, dtype=torch.int32).cuda(non_blocking=True)
+            if has_cu_seqlens
+            else None
+        )
+        cu_seqlens_chunks = (
+            torch.empty(num_chunks_plus_1, dtype=torch.int32).cuda(non_blocking=True)
+            if has_cu_seqlens_chunks
+            else None
+        )
 
     # Step 4: broadcast data tensors.
     dist.broadcast(input_ids, src=src_rank, group=tp_group)
@@ -121,12 +149,15 @@ def get_text_batch_on_this_tp_rank(data_iterator):
     dist.broadcast(loss_masks, src=src_rank, group=tp_group)
     if has_cu_seqlens:
         dist.broadcast(cu_seqlens, src=src_rank, group=tp_group)
+    if has_cu_seqlens_chunks:
+        dist.broadcast(cu_seqlens_chunks, src=src_rank, group=tp_group)
 
     return {
         "input_ids": input_ids,
         "labels": labels,
         "loss_masks": loss_masks,
         "cu_seqlens": cu_seqlens,
+        "cu_seqlens_chunks": cu_seqlens_chunks,
     }
 
 

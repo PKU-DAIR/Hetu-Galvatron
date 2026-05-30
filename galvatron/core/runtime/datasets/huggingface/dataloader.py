@@ -13,6 +13,9 @@ from galvatron.core.runtime.datasets.huggingface.dataset import (
 from galvatron.core.runtime.datasets.huggingface.prefetch_strategy import (
     build_multiprocess_batch_generator,
 )
+from galvatron.core.runtime.datasets.huggingface.dyn_bsz_prefetch import (
+    build_dyn_bsz_batch_generator,
+)
 
 
 def is_hf_dataset_built_on_rank():
@@ -61,6 +64,18 @@ def get_hf_train_valid_test_data_iterators(args):
             valid_it = _build_prefetch_loader(args, valid_path, "train", text_keys, 0, batch_size)
         if test_path:
             test_it = _build_prefetch_loader(args, test_path, "train", text_keys, 0, batch_size)
+        return (
+            iter(train_it),
+            iter(valid_it) if valid_it is not None else None,
+            iter(test_it) if test_it is not None else None,
+        )
+
+    if mode == "dyn_bsz":
+        train_it = _build_dyn_bsz_loader(args, train_path, "train", text_keys, shuffle_buffer)
+        if valid_path:
+            valid_it = _build_dyn_bsz_loader(args, valid_path, "train", text_keys, 0)
+        if test_path:
+            test_it = _build_dyn_bsz_loader(args, test_path, "train", text_keys, 0)
         return (
             iter(train_it),
             iter(valid_it) if valid_it is not None else None,
@@ -116,6 +131,27 @@ def _build_prefetch_loader(
         seed=getattr(args.train, "seed", 42),
         num_workers=getattr(args.data, "hf_num_workers", 0),
         batch_size=batch_size,
+        prefetch_factor=getattr(args.data, "hf_prefetch_factor", 2),
+    )
+
+
+def _build_dyn_bsz_loader(
+    args,
+    path: Optional[str],
+    split: str,
+    text_keys,
+    shuffle_buffer: int,
+):
+    if path is None:
+        return None
+
+    return build_dyn_bsz_batch_generator(
+        train_ds_path=path,
+        split=split,
+        text_keys=text_keys,
+        shuffle_buffer_size=shuffle_buffer,
+        seed=getattr(args.train, "seed", 42),
+        num_workers=getattr(args.data, "hf_num_workers", 0),
         prefetch_factor=getattr(args.data, "hf_prefetch_factor", 2),
     )
 

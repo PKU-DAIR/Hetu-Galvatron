@@ -1,51 +1,86 @@
-import torch
+from itertools import accumulate
 from typing import List, Tuple, Callable
+
+import torch
 from torch import Tensor
-from galvatron.core.runtime.utils.utils import average_losses_across_data_parallel_group, average_losses_across_context_parallel_group
 from galvatron.core.runtime.parallel_state import get_args, get_tokenizer
+
+# from .loss_func import hf_packing_loss_func
 
 
 # Ignore index for labels (no loss on padding / last position).
 IGNORE_INDEX = -100
 
-def hf_packing_loss_func(labels_list, output_tensor_list):
-    loss = output_tensor_list[0].float()
-    loss_mask = torch.ones_like(loss).float()
-    loss = torch.sum(loss.view(-1) * loss_mask.view(-1)) / loss_mask.sum().clamp(min=1)
-    averaged_loss = average_losses_across_data_parallel_group([loss])
-    averaged_loss = average_losses_across_context_parallel_group(averaged_loss)
-    return loss, averaged_loss.squeeze().clone().detach()
-    
+
 class PackingCollator:
-    def __call__(self, batch: List[Tensor]) -> Tuple[Tensor, dict, Callable]:
-        # batch: list of 1D tensors (input_ids per chunk)
-        input_ids_list = [t.view(-1) for t in batch]
-        labels_list = []
-        for t in input_ids_list:
-            labels = torch.empty_like(t, dtype=t.dtype)
-            labels[:-1] = t[1:]
-            labels[-1] = IGNORE_INDEX
-            labels_list.append(labels)
+    """
+    Fixed-shape packing collator for HF data. ``batch`` is a flat list of 1D
+    token tensors whose length is a multiple of ``chunks``; consecutive
+    ``len(batch) // chunks`` samples form one micro-batch chunk and each
+    chunk is padded to a multiple of ``align_to`` (default 8) tokens. The
+    padding is appended to the last sample's segment so it belongs to the
+    same sequence in ``cu_seqlens``, with ``labels = IGNORE_INDEX`` and
+    ``loss_masks = 0``.
 
-        cu_seqlens = torch.zeros(
-            len(batch) + 1, dtype=torch.int32
-        )
-        cu_seqlens[0] = 0
-        for i in range(1, len(cu_seqlens)):
-            cu_seqlens[i] = cu_seqlens[i - 1] + input_ids_list[i - 1].numel()
+    Output dict mirrors ``DynamicBatchCollator`` but without
+    ``cu_seqlens_chunks`` — chunk boundaries are implicit since every chunk
+    holds the same number of real samples.
+    """
 
-        input_ids = torch.cat(input_ids_list, dim=0).view(1, -1).contiguous()
-        labels = torch.cat(labels_list, dim=0).view(1, -1).contiguous()
-        return (
-            input_ids,
-            {
-                "cu_seqlens": cu_seqlens,
-                "attention_mask": None,
-                "labels": labels,
-                "rotary_embedding": None,
-            },
-            hf_packing_loss_func,
+    def __init__(self, chunks: int, align_to: int = 8):
+        assert chunks >= 1, f"chunks must be >= 1, got {chunks}"
+        assert align_to >= 1, f"align_to must be >= 1, got {align_to}"
+        self.chunks = chunks
+        self.align_to = align_to
+
+    def __call__(self, batch: List[Tensor]) -> dict:
+        assert len(batch) % self.chunks == 0, (
+            f"batch length {len(batch)} must be a multiple of chunks {self.chunks}"
         )
+        samples_per_chunk = len(batch) // self.chunks
+
+        input_ids_parts: List[Tensor] = []
+        labels_parts: List[Tensor] = []
+        loss_masks_parts: List[Tensor] = []
+        sample_lengths: List[int] = []
+
+        for c in range(self.chunks):
+            chunk_tokens = 0
+            chunk_dtype = None
+            for i in range(samples_per_chunk):
+                t = batch[c * samples_per_chunk + i].view(-1)
+                input_ids_parts.append(t)
+                labels = torch.empty_like(t, dtype=t.dtype)
+                labels[:-1] = t[1:]
+                labels[-1] = IGNORE_INDEX
+                labels_parts.append(labels)
+                loss_masks_parts.append(torch.ones_like(t, dtype=torch.float32))
+                sample_lengths.append(t.numel())
+                chunk_tokens += t.numel()
+                chunk_dtype = t.dtype
+
+            # Pad this chunk up to a multiple of ``align_to`` tokens, appended
+            # to the last sample's segment.
+            remainder = chunk_tokens % self.align_to
+            if remainder != 0 and chunk_tokens > 0:
+                pad_len = self.align_to - remainder
+                input_ids_parts.append(torch.zeros(pad_len, dtype=chunk_dtype))
+                labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=chunk_dtype))
+                loss_masks_parts.append(torch.zeros(pad_len, dtype=torch.float32))
+                sample_lengths[-1] += pad_len
+
+        input_ids = torch.cat(input_ids_parts, dim=0).unsqueeze(0).contiguous()
+        labels = torch.cat(labels_parts, dim=0).unsqueeze(0).contiguous()
+        loss_masks = torch.cat(loss_masks_parts, dim=0).unsqueeze(0).contiguous()
+
+        cu_seqlens = torch.tensor(list(accumulate(sample_lengths, initial=0)), dtype=torch.int32)
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "loss_masks": loss_masks,
+            "cu_seqlens": cu_seqlens,
+        }
 
 class PaddingCollator:
     def __init__(self, seq_length: int, pad_token_id: int = 0):
@@ -90,15 +125,15 @@ class PaddingCollator:
         labels[:, -1] = IGNORE_INDEX
         labels[~padding_mask] = IGNORE_INDEX
 
-        loss_mask = (labels != IGNORE_INDEX).float()
+        loss_masks = (labels != IGNORE_INDEX).float()
         position_ids = torch.arange(
             self.seq_length, dtype=torch.long
         ).unsqueeze(0).expand(input_ids.size(0), -1).contiguous()
 
         result = {
-            "tokens": input_ids,
+            "input_ids": input_ids,
             "labels": labels,
-            "loss_mask": loss_mask,
+            "loss_masks": loss_masks,
             "position_ids": position_ids,
         }
 
@@ -110,10 +145,88 @@ class PaddingCollator:
 
         return result
 
+class DynamicBatchCollator:
+    """
+    Dyn-bsz pack collator for HF data. Input is a list of ``num_microbatches``
+    buckets, each a list of variable-length 1D token tensors. Each bucket is
+    packed into one micro-batch and then padded so that its token count is a
+    multiple of ``align_to`` (default 8); the padding is appended to the last
+    sample's segment in ``cu_seqlens``, with ``loss_masks = 0`` and
+    ``labels = IGNORE_INDEX`` to keep it out of the loss.
+
+    Output dict:
+
+    - ``input_ids`` / ``labels`` / ``loss_masks``: ``(1, total_T)`` tensors,
+      where ``total_T`` is the sum of per-bucket aligned token counts.
+    - ``cu_seqlens``: ``List[int]`` of length ``N+1``, every inner-sample
+      boundary (including the per-bucket pad slot when present) across the
+      whole pack.
+    - ``cu_seqlens_chunks``: ``List[int]`` of length ``num_microbatches+1``,
+      indices into ``cu_seqlens`` marking micro-batch ends.
+
+    ``cu_seqlens`` variants are kept as plain Python lists to stay queue-
+    friendly (cheap pickle, no torch shared-memory churn). Convert to int32
+    tensors on the consumer side if downstream code needs them.
+    """
+
+    def __init__(self, align_to: int = 8):
+        assert align_to >= 1, f"align_to must be >= 1, got {align_to}"
+        self.align_to = align_to
+
+    def __call__(self, buckets: List[List[Tensor]]) -> dict:
+        input_ids_parts: List[Tensor] = []
+        labels_parts: List[Tensor] = []
+        loss_masks_parts: List[Tensor] = []
+        sample_lengths: List[int] = []
+        chunk_sample_offsets: List[int] = [0]
+
+        for bucket in buckets:
+            bucket_tokens = 0
+            bucket_dtype = None
+            for t in bucket:
+                input_ids_parts.append(t)
+                labels = torch.empty_like(t, dtype=t.dtype)
+                labels[:-1] = t[1:]
+                labels[-1] = IGNORE_INDEX
+                labels_parts.append(labels)
+                loss_masks_parts.append(torch.ones_like(t, dtype=torch.float32))
+                sample_lengths.append(t.numel())
+                bucket_tokens += t.numel()
+                bucket_dtype = t.dtype
+
+            # Pad the bucket up to a multiple of ``align_to`` tokens, appended
+            # to the last sample's segment.
+            remainder = bucket_tokens % self.align_to
+            if remainder != 0 and bucket_tokens > 0:
+                pad_len = self.align_to - remainder
+                input_ids_parts.append(torch.zeros(pad_len, dtype=bucket_dtype))
+                labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=bucket_dtype))
+                loss_masks_parts.append(torch.zeros(pad_len, dtype=torch.float32))
+                sample_lengths[-1] += pad_len
+            chunk_sample_offsets.append(len(sample_lengths))
+
+        input_ids = torch.cat(input_ids_parts, dim=0).unsqueeze(0).contiguous()
+        labels = torch.cat(labels_parts, dim=0).unsqueeze(0).contiguous()
+        loss_masks = torch.cat(loss_masks_parts, dim=0).unsqueeze(0).contiguous()
+
+        cu_seqlens: List[int] = list(accumulate(sample_lengths, initial=0))
+
+        return {
+            "input_ids": input_ids,
+            "labels": labels,
+            "loss_masks": loss_masks,
+            "cu_seqlens": cu_seqlens,
+            "cu_seqlens_chunks": chunk_sample_offsets,
+        }
+
+
 def get_collate_fn():
     args = get_args()
+    if args.data.hf_data_mode == 'dyn_bsz':
+        return DynamicBatchCollator()
     if args.data.hf_collator_mode == "packing":
-        return PackingCollator()
+        chunks = args.train.chunks # accumulation steps
+        return PackingCollator(chunks=chunks)
     elif args.data.hf_collator_mode == "padding":
         tokenizer = get_tokenizer()
         pad_token_id = None
