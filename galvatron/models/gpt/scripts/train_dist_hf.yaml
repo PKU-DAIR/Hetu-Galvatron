@@ -1,0 +1,95 @@
+# GPT-2 distributed training config (GalvatronRuntimeArgs)
+# Usage: ./scripts/train_yaml.sh [overrides...]
+# Override example: ./scripts/train_yaml.sh train.lr=1e-5 parallel.pp_deg=2
+
+paths:
+  train_data_path: /home/pkuhetu/lly/dataset/fineweb_10BT/data/CC-MAIN-2013-20         # set to your tokenized dataset path
+  tokenizer_model: /home/pkuhetu/lly/WorkSpace/ckpt/llama/llama2-7b-chat-hf   # set to your tokenizer path
+  model_config_path: ../model_configs/llama2-7b.yaml
+
+
+runtime:
+  parallel:
+    pp_deg: 1
+    global_tp_deg: 2
+    global_tp_consec: 1
+    global_cp_deg: 1
+    global_ep_deg: 1
+    global_tp_of_ep_deg: 1
+    global_checkpoint: 0
+    cp_mode: zigzag
+    sdp: 0
+    default_dp_type: ddp
+    pipeline_type: gpipe
+    galvatron_config_path: null
+    vocab_sdp: 0
+    vocab_tp: 2
+    vocab_cp: 1
+    async_grad_reduce: true
+    mixed_precision: bf16
+    use_ulysses: false
+    reduce_in_fp32: false
+    entropy_in_fp32: false
+
+  model:
+    is_moe_model: false
+    set_experts_manually: 0
+    set_model_config_manually: 0
+    set_layernum_manually: 1
+    set_seqlen_manually: 0
+    initialize_on_meta: 1
+    shape_order: SBH
+    dropout_prob: 0.0
+    print_loss: 0
+    model_size: llama2-7b
+    model_config_path: ${paths.model_config_path}
+    num_layers: 4
+
+  profile:
+    profile: 1
+    profile_mode: static
+    profile_unit: all
+    profile_forward: 0
+    save_profiled_memory: 0
+    exit_after_profiling: 1
+
+  train:
+    train_iters: 20
+    eval_iters: 1
+    lr: 6.0e-4
+    min_lr: 6.0e-5
+    lr_decay_style: cosine
+    lr_warmup_fraction: 0.1
+    weight_decay: 0.1
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-8
+    init_method_std: 0.02
+    sequence_parallel: true
+    use_flash_attn: true
+    global_batch_size: 32
+    micro_batch_size: 1
+    chunks: 1
+    seq_length: 1024
+    clip_grad: 1.0
+    use_pytorch_profiler: true
+
+  data:
+    data_source: hf
+    hf_data_mode: prefetch
+    train_data_path: ${paths.train_data_path}
+    hf_text_keys: text
+    hf_collator_mode: padding
+    hf_shuffle_buffer_size: 0
+    hf_num_workers: 4
+    hf_prefetch_factor: 2
+    tokenizer_type: HuggingFaceTokenizer
+    tokenizer_model: ${paths.tokenizer_model}
+    shared_storage: true
+
+  ckpt:
+    load: null
+    load_iteration: 0
+    distributed_checkpoint: false
+    save: null
+    save_interval: null

@@ -334,3 +334,40 @@ def average_losses_across_data_parallel_group(losses):
     averaged_losses = averaged_losses / parallel_state.get_parallel_world_size(vocab_dp_comm_group.group)
 
     return averaged_losses
+
+def average_losses_across_context_parallel_group(losses):
+    """Reduce a tensor of losses across all GPUs."""
+    averaged_losses = torch.cat(
+        [loss.clone().detach().view(1) for loss in losses])
+    torch.distributed.all_reduce(averaged_losses,
+                                 group=mpu.get_context_parallel_group())
+    averaged_losses = averaged_losses / \
+        torch.distributed.get_world_size(group=mpu.get_context_parallel_group())
+
+    return averaged_losses
+
+
+def cp_zigzag_positions(N: int, cp_size: int, cp_rank: int, device) -> torch.Tensor:
+    """CP zigzag (load-balanced) position slice for a length-N sequence.
+
+    cp_rank `r` owns `[r*seg, (r+1)*seg) ∪ [N - (r+1)*seg, N - r*seg)`, where
+    `seg = N // (2*cp_size)`. Pairing one early chunk with one late chunk
+    balances the causal-attention workload across CP ranks.
+
+    Returns a 1-D LongTensor of length `N // cp_size`. When `cp_size <= 1` this
+    degenerates to `torch.arange(N)`.
+    """
+    if cp_size <= 1:
+        return torch.arange(N, device=device)
+    seg = N // (2 * cp_size)
+    front = torch.arange(cp_rank * seg, (cp_rank + 1) * seg, device=device)
+    back = torch.arange(N - (cp_rank + 1) * seg, N - cp_rank * seg, device=device)
+    return torch.cat([front, back])
+
+
+def sp_narrow_positions(positions: torch.Tensor, sp_size: int, sp_rank: int) -> torch.Tensor:
+    """Sequence-parallel narrow: take this sp_rank's contiguous shard of `positions`."""
+    if sp_size <= 1:
+        return positions
+    sp_len = positions.shape[0] // sp_size
+    return positions[sp_rank * sp_len : (sp_rank + 1) * sp_len]

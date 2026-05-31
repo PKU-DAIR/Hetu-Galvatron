@@ -141,6 +141,8 @@ class Attention(torch.nn.Module, ABC):
         assert self.use_flash_attn, "Flash attention is required"
         assert self.sequence_parallel, "Sequence parallel is required"
         self.dp_group = dp_group
+        self.cp_group = cp_group
+        self.sp_group = sp_group
         
         # For normal attention without groups, num_query_groups == num_attention_heads;
         # when num_query_groups is None we default to MHA.
@@ -158,10 +160,11 @@ class Attention(torch.nn.Module, ABC):
             sp_world_size = 1
         else:
             sp_world_size = get_parallel_world_size(sp_group)
-        if sp_world_size > 1:
-            self.use_ulysses = True
-        else:
-            self.use_ulysses = False
+        # if sp_world_size > 1:
+        #     self.use_ulysses = True
+        # else:
+        #     self.use_ulysses = False
+        self.use_ulysses = args.parallel.use_ulysses
         if cp_group is None:
             cp_world_size = 1
         else:
@@ -626,7 +629,9 @@ class Attention(torch.nn.Module, ABC):
         # ================================================
         # relative positional embedding (rotary embedding)
         # ================================================
-        if rotary_pos_emb is not None and not self.args.train.flash_decode:
+        if rotary_pos_emb is not None and (
+            not self.args.train.flash_decode or inference_context is None # Megatron-LM(v0.15.0): Make flash_decode=True + inference_context=None work
+        ):
             q_pos_emb, k_pos_emb = rotary_pos_emb
 
             if packed_seq_params is not None:
@@ -645,7 +650,12 @@ class Attention(torch.nn.Module, ABC):
                 # TODO VIJAY: simplify
                 if inference_context is None or inference_context.is_static_batching():
                     query = apply_rotary_pos_emb(
-                        query, q_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q
+                        query, 
+                        q_pos_emb, 
+                        config=self.config,
+                        cu_seqlens=cu_seqlens_q,
+                        cp_group=self.cp_group,
+                        sp_group=self.sp_group
                     )
                 else:
                     query = inference_context.apply_rotary_emb_query(
@@ -653,7 +663,12 @@ class Attention(torch.nn.Module, ABC):
                     )
             if k_pos_emb is not None:
                 key = apply_rotary_pos_emb(
-                    key, k_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv
+                    key, 
+                    k_pos_emb, 
+                    config=self.config, 
+                    cu_seqlens=cu_seqlens_kv,
+                    cp_group=self.cp_group,
+                    sp_group=self.sp_group
                 )
 
             # TODO, can apply positional embedding to value_layer so it has
@@ -680,6 +695,14 @@ class Attention(torch.nn.Module, ABC):
                         packed_seq_params=packed_seq_params,
                     )
                 else:
+                    # attention only supports [s, b, h, d] or packed format [t, np, h, d]
+                    if packed_seq_params is not None:
+                        query = query.unsqueeze(1)
+                        key = key.unsqueeze(1)
+                        value = value.unsqueeze(1)
+                    cu_seqlens_q = packed_seq_params.cu_seqlens_q if packed_seq_params is not None else None
+                    cu_seqlens_kv = packed_seq_params.cu_seqlens_kv if packed_seq_params is not None else None
+
                     q, k, v = [
                         rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
                     ]
@@ -688,16 +711,24 @@ class Attention(torch.nn.Module, ABC):
                     #     with tensor_parallel.get_cuda_rng_tracker().fork():
                     #         core_attn_out = self.flash_attention(q, k, v)
                     # else:
-                    core_attn_out = self.flash_attention(q, k, v)
+                    core_attn_out = self.flash_attention(q, k, v, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv)
                     core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
             else:
                 if self.use_flash_attn:
+                    # attention only supports [s, b, h, d] or packed format [t, np, h, d]
+                    if packed_seq_params is not None:
+                        query = query.unsqueeze(1)
+                        key = key.unsqueeze(1)
+                        value = value.unsqueeze(1)
+                    cu_seqlens_q = packed_seq_params.cu_seqlens_q if packed_seq_params is not None else None
+                    cu_seqlens_kv = packed_seq_params.cu_seqlens_kv if packed_seq_params is not None else None
+
                     batch_dim_idx = 0
                     q, k, v = [
                         rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
                     ]
 
-                    context_layer = self.dist_attn(q, k, v, batch_dim_idx)
+                    context_layer = self.dist_attn(q, k, v, batch_dim_idx, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv)
                     context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
                     core_attn_out = context_layer
                 else:

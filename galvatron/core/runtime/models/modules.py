@@ -12,6 +12,7 @@ from galvatron.core.runtime.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
 )
 from galvatron.core.runtime.tensor_parallel.utils import VocabUtility, divide
+from galvatron.core.runtime.utils.utils import cp_zigzag_positions, sp_narrow_positions
 
 from galvatron.core.runtime.transformer.attention import SelfAttention, SelfAttentionSubmodules, AttnMaskType
 from galvatron.core.runtime.transformer.attention_impl import (
@@ -26,6 +27,7 @@ from galvatron.core.runtime.transformer.rotary_pos_embedding import RotaryEmbedd
 from galvatron.core.runtime.tensor_parallel.layers import linear_with_grad_accumulation_and_async_allreduce
 from galvatron.core.runtime.transformer.norm import GalvatronNorm
 from galvatron.core.runtime.args_schema import GalvatronRuntimeArgs
+from galvatron.core.runtime.transformer.attention import PackedSeqParams
 
 
 # =========================================================================
@@ -65,31 +67,54 @@ class GalvatronEmbedding(nn.Module):
 
         self.drop = nn.Dropout(m.hidden_dropout) if m.hidden_dropout > 0 else nn.Identity()
 
-        if self.vocab_sp:
-            cp_size = parallel_state.get_parallel_world_size(self.cp_group) if self.cp_group is not None else 1
-            seq_len = args.train.seq_length // cp_size
-            self.seq_start, self.seq_end = VocabUtility.vocab_range_from_global_vocab_size(
-                seq_len,
-                parallel_state.get_parallel_rank(self.sp_group),
-                parallel_state.get_parallel_world_size(self.sp_group),
-            )
+        self.sp_size = parallel_state.get_parallel_world_size(self.sp_group) if self.sp_group is not None else 1
+        self.sp_rank = parallel_state.get_parallel_rank(self.sp_group) if self.sp_group is not None else 0
+        self.cp_size = parallel_state.get_parallel_world_size(self.cp_group) if self.cp_group is not None else 1
+        self.cp_rank = parallel_state.get_parallel_rank(self.cp_group) if self.cp_group is not None else 0
 
-    def forward(self, input_ids, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
+    def forward(self, input_ids, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None, cu_seqlens=None):
         if self.vocab_sp:
-            input_ids = input_ids[:, self.seq_start:self.seq_end].contiguous()
+            input_ids_lens = input_ids.shape[1] # input_ids.shape is (b, seq_len)
+            partition_size = divide(input_ids_lens, self.sp_size)
+            start_index, end_index = self.sp_rank * partition_size, (self.sp_rank + 1) * partition_size
+            input_ids = input_ids[:, start_index:end_index].contiguous()
 
         hidden_states = self.embed_tokens(input_ids)
 
         if self.has_position_embedding:
             if position_ids is None:
-                if self.embed_tokens.reduce_scatter_embeddings:
+                # Layout differs only in (1) which dim is seq vs batch and (2) the final
+                # reshape; the position-id computation itself is the same.
+                sbh = self.embed_tokens.reduce_scatter_embeddings
+                if sbh:  # SBH
                     s, b = hidden_states.shape[0], hidden_states.shape[1]
-                    position_ids = torch.arange(s, device=hidden_states.device).unsqueeze(1).expand(s, b)
-                else:
-                    s = input_ids.size(1)
-                    position_ids = torch.arange(s, device=input_ids.device).unsqueeze(0).expand(
-                        input_ids.size(0), s
+                else:    # BSH
+                    b, s = hidden_states.shape[0], hidden_states.shape[1]
+
+                # CP zigzag (load-balanced) is applied per-sample in pack mode, or on the
+                # whole sequence otherwise; SP then narrows the resulting stream by sp_rank.
+                if cu_seqlens is None:
+                    original_seq_len = s * self.cp_size * self.sp_size
+                    positions = sp_narrow_positions(
+                        cp_zigzag_positions(original_seq_len, self.cp_size, self.cp_rank, hidden_states.device),
+                        self.sp_size, self.sp_rank,
                     )
+                else:
+                    assert b == 1, f'Sequence parallel with cu_seqlens only supports batch size of 1, but got batch size {b}.'
+                    # Pack mode: each sample restarts positions at 0; CP zigzag is per-sample,
+                    # SP narrows the concatenated stream. cu_seqlens is the ORIGINAL
+                    # (pre-CP/SP) cumulative sequence lengths.
+                    seq_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+                    positions = sp_narrow_positions(
+                        torch.cat([
+                            cp_zigzag_positions(L, self.cp_size, self.cp_rank, hidden_states.device)
+                            for L in seq_lens
+                        ]),
+                        self.sp_size, self.sp_rank,
+                    )
+
+                position_ids = positions.unsqueeze(1).expand(s, b) if sbh else positions.unsqueeze(0).expand(b, s)
+
             hidden_states = hidden_states + self.embed_positions(position_ids)
 
         hidden_states = self.drop(hidden_states)
@@ -149,37 +174,22 @@ class GalvatronAttention(nn.Module):
 
         self.head_dim = m.kv_channels or (m.hidden_size // m.num_attention_heads)
         self.use_rope = m.position_embedding_type in ("rope", "mrope")
+
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, rotary_embedding=None, cu_seqlens=None):
         if self.use_rope:
-            self.rotary_pos_emb = RotaryEmbedding(
-                self.head_dim,
-                m.rotary_percent or 1.0,
-                rotary_interleaved=m.rotary_interleaved,
-                seq_len_interpolation_factor=m.rotary_seq_len_interpolation_factor,
-                rotary_base=m.rotary_base or 10000,
-                cp_group=self.cp_group,
-                sp_group=self.sp_group,
-            )
+            assert rotary_embedding is not None, "rotary_embedding must be provided for attention when using RoPE"
 
-    def _get_rotary_pos_emb(self, hidden_states):
-        seq_len = hidden_states.shape[0]
-        if self.sequence_parallel:
-            if self.use_ulysses:
-                if self.use_zigzag_cp:
-                    return self.rotary_pos_emb(seq_len * self.cp_size * self.sp_size)
-                offset = seq_len * parallel_state.get_parallel_rank(self.sp_group)
-                return self.rotary_pos_emb(seq_len, offset=offset)
-            if self.use_zigzag_cp:
-                return self.rotary_pos_emb(seq_len * self.tp_size * self.cp_size)
-            return self.rotary_pos_emb(seq_len * self.tp_size)
-        if self.use_zigzag_cp:
-            return self.rotary_pos_emb(seq_len * self.cp_size)
-        return self.rotary_pos_emb(seq_len)
-
-    def forward(self, hidden_states, position_ids, attention_mask, rotary_embedding):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        rotary_embedding = self._get_rotary_pos_emb(hidden_states) if self.use_rope and not rotary_embedding else rotary_embedding
-        hidden_states, attn_bias = self.attention(hidden_states, attention_mask, rotary_pos_emb=rotary_embedding)
+        
+        packed_seq_params: PackedSeqParams = None
+        if cu_seqlens is not None:
+            packed_seq_params = PackedSeqParams(
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_kv=cu_seqlens,
+            )
+        
+        hidden_states, attn_bias = self.attention(hidden_states, attention_mask, rotary_pos_emb=rotary_embedding, packed_seq_params=packed_seq_params)
         if attn_bias is not None:
             hidden_states = hidden_states + attn_bias
         return hidden_states + residual
@@ -229,8 +239,8 @@ class GalvatronDecoderLayer(nn.Module):
         self.attn = GalvatronAttention(args, layer_idx, tp_group, sp_group, cp_group)
         self.ffn = GalvatronMLP(args, layer_idx, tp_group, sp_group, cp_group)
 
-    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
-        hidden_states = self.attn(hidden_states, position_ids, attention_mask, rotary_embedding)
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None, cu_seqlens=None):
+        hidden_states = self.attn(hidden_states, position_ids, attention_mask, rotary_embedding, cu_seqlens)
         hidden_states = self.ffn(hidden_states)
         return hidden_states
 
@@ -247,7 +257,7 @@ class GalvatronFinalNorm(nn.Module):
         m = args.model
         self.norm = GalvatronNorm(m, m.hidden_size, eps=m.norm_epsilon)
 
-    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None, cu_seqlens=None):
         return self.norm(hidden_states)
 
 
@@ -303,18 +313,16 @@ class GalvatronCausalLMHead(nn.Module):
 
         self.lm_head = _LMHeadLinear(m, self.sequence_parallel, self.tp_group)
 
-        if self.vocab_sp and sp_group is not None:
-            cp_size = parallel_state.get_parallel_world_size(self.cp_group) if self.cp_group is not None else 1
-            seq_len = args.train.seq_length // cp_size
-            self.seq_start, self.seq_end = VocabUtility.vocab_range_from_global_vocab_size(
-                seq_len,
-                parallel_state.get_parallel_rank(self.sp_group),
-                parallel_state.get_parallel_world_size(self.sp_group),
-            )
+        self.sp_size = parallel_state.get_parallel_world_size(self.sp_group) if self.sp_group is not None else 1
+        self.sp_rank = parallel_state.get_parallel_rank(self.sp_group) if self.sp_group is not None else 0
 
-    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None):
+    def forward(self, hidden_states, position_ids=None, attention_mask=None, labels=None, rotary_embedding=None, cu_seqlens=None):
         if self.vocab_sp:
-            labels = labels[:, self.seq_start:self.seq_end].contiguous()
+            labels_lens = labels.shape[1] # labels.shape is (b, seq_len)
+            partition_size = divide(labels_lens, self.sp_size)
+            start_index, end_index = self.sp_rank * partition_size, (self.sp_rank + 1) * partition_size
+            labels = labels[:, start_index:end_index].contiguous()
+
         if not self.sequence_parallel:
             hidden_states = copy_to_tensor_model_parallel_region(hidden_states, self.tp_group)
 
@@ -332,9 +340,11 @@ class GalvatronCausalLMHead(nn.Module):
                 logits_parallel, labels, self.half_entropy, tp_group=self.tp_group,
             )
             if self.vocab_sp:
+                loss = loss.transpose(0, 1).contiguous() # (seq_len, b) -> (b, seq_len) for consistency with the case without vocab parallelism, but this is really just for better logging and debugging, it doesn't affect the actual loss value since it's just a transpose
                 loss = gather_from_tensor_model_parallel_region(loss, self.sp_group)
 
-        loss = loss.transpose(0, 1).contiguous()
+        if self.vocab_sp == False:
+            loss = loss.transpose(0, 1).contiguous()
         return loss
 
 

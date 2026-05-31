@@ -25,6 +25,7 @@ from galvatron.core.runtime.args_schema import GalvatronRuntimeArgs
 from galvatron.core.runtime.models.arch import ModelInfo, BlockNames
 from galvatron.core.runtime.pipeline import PipelineParallel
 from galvatron.core.runtime import parallel_state
+from galvatron.core.runtime.transformer.rotary_pos_embedding import RotaryEmbedding
 
 version_str = torch.__version__
 version_major, version_minor, _ = version_str.split(".")
@@ -48,6 +49,27 @@ class GalvatronModel(nn.Module):
         self.model = hp_model
         self.iter = 0
 
+        self.rotary_pos_emb = None
+        if self.args.model.position_embedding_type in ("rope", "mrope"):
+            m = self.args.model
+            head_dim = m.kv_channels or (m.hidden_size // m.num_attention_heads)
+            self.rotary_pos_emb = RotaryEmbedding(
+                head_dim,
+                m.rotary_percent or 1.0,
+                rotary_interleaved=m.rotary_interleaved,
+                seq_len_interpolation_factor=m.rotary_seq_len_interpolation_factor,
+                rotary_base=m.rotary_base or 10000,
+            )
+
+    def preprocess_runtime_kwargs(self, kwargs):
+        runtime_kwargs = dict(kwargs)
+
+        if self.rotary_pos_emb is not None:
+            max_seq_len = self.args.train.seq_length
+            runtime_kwargs["rotary_embedding"] = self.rotary_pos_emb(max_seq_len)
+        
+        return runtime_kwargs
+
     def forward_backward(self, batch, iter=None, profiler=None, loss_func=None, **kwargs):
         args, model = self.args, self.model
         self.iter = iter if iter is not None else self.iter
@@ -63,6 +85,8 @@ class GalvatronModel(nn.Module):
             loss_func = self.fake_loss_func
             assert isinstance(batch, (tuple, list))
             batch = [batch, [self.fake_tensor(batch[0])]]
+        
+        kwargs = self.preprocess_runtime_kwargs(kwargs)
         if args.parallel.pp_deg > 1:
             if args.parallel.pipeline_type == "gpipe":
                 loss = model.gpipe_forward(batch, loss_func, **kwargs)

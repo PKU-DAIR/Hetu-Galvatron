@@ -1,7 +1,7 @@
 """Distributed training entry point for GPT.
 
 Usage:
-    torchrun ... train_dist.py scripts/train_dist.yaml [overrides...]
+  torchrun ... train_dist.py <config.yaml> [hydra overrides...]
 """
 
 import os
@@ -12,9 +12,18 @@ import torch
 from galvatron.core.arguments import load_with_hydra
 from galvatron.core.runtime.optimizer.utils import clip_grad_norm, get_optimizer_and_param_scheduler
 from galvatron.core.runtime.models.builder import build_model, get_runtime_profiler
-from galvatron.core.runtime.dataloader import get_batch, get_train_valid_test_data_iterators
+from galvatron.core.runtime.dataloader import get_batch as default_get_batch, get_train_valid_test_data_iterators
 from galvatron.core.runtime.utils.utils import set_megatron_args_for_dataset
+from galvatron.core.runtime.checkpoint.llama_adapter import save_llama_module
 from galvatron.core.runtime.initialize import initialize_galvatron, _print_args
+from galvatron.core.runtime.datasets.huggingface.dataloader import (
+    get_hf_train_valid_test_data_iterators,
+    is_hf_dataset_built_on_rank,
+)
+from galvatron.core.runtime.datasets.huggingface.interface import get_hf_batch
+from galvatron.core.runtime.datasets.dummy_dataset import get_dummy_text_data_iterator, get_dummy_text_batch, get_dynamic_batch_data_iterator, get_dynamic_batch
+import galvatron.core.runtime.parallel_state as parallel_state
+from galvatron.utils import print_loss
 from galvatron.utils.hf_config_adapter import resolve_model_config
 from galvatron.core.runtime.checkpoint.llama_adapter import save_llama_module
 
@@ -27,19 +36,43 @@ def train(args):
     resolve_model_config(args)
     model = build_model(args)
 
+    data_source = getattr(args.data, "data_source", "megatron")
+
+    if data_source == "hf" and getattr(args.train, "use_flash_attn", False):
+        args.data.create_attention_mask_in_dataloader = False
+
     if local_rank == 0:
-        print("Creating Dataset...")
+        print("Creating dataset...")
+        _print_args(args)
 
     set_megatron_args_for_dataset(args)
 
-    _print_args(args)
+    if data_source == "hf":
+        if is_hf_dataset_built_on_rank():
+            train_data_iterator, valid_data_iterator, test_data_iterator = get_hf_train_valid_test_data_iterators(args)
+        else:
+            train_data_iterator, valid_data_iterator, test_data_iterator = None, None, None
+        torch.distributed.barrier()
+        get_batch = get_hf_batch # override get_batch to get_hf_batch for HF data pipeline
+    elif data_source == 'dummy':
+        if (parallel_state.is_pipeline_first_stage() or parallel_state.is_pipeline_last_stage()) and parallel_state.get_vocab_tp_sp_rank() == 0:
+            if args.data.dummy_dyn_bsz == False:
+                train_data_iterator = get_dummy_text_data_iterator(args)
+            else:
+                train_data_iterator = get_dynamic_batch_data_iterator(args)
+        else:
+            train_data_iterator = None
+        valid_data_iterator, test_data_iterator = None, None
+        get_batch = get_dummy_text_batch if args.data.dummy_dyn_bsz == False else get_dynamic_batch # override get_batch to get_dummy_text_batch or get_dynamic_batch_collate_fn for dummy data pipeline
+    else:
+        train_data_iterator, valid_data_iterator, test_data_iterator = get_train_valid_test_data_iterators()
+        get_batch = default_get_batch # use default get_batch for Megatron data pipeline
 
-    train_data_iterator, valid_data_iterator, test_data_iterator = get_train_valid_test_data_iterators()
     optimizer, opt_param_scheduler = get_optimizer_and_param_scheduler(model, args)
 
     path = os.path.dirname(os.path.abspath(__file__))
     start_iter = args.train.iteration
-    end_iter = max(start_iter + 1, args.train.train_iters - 1)
+    end_iter = max(start_iter + 1, args.train.train_iters)
     profiler = get_runtime_profiler(args, path, start_iter=start_iter, end_iter=end_iter)
     profiler.profile_memory(0, "After creating model")
 
@@ -62,6 +95,9 @@ def train(args):
 
         profiler.profile_memory(iter_idx, "After optimizer_step")
         optimizer.zero_grad()
+
+        # print_loss(args, loss, -1, iter_idx)
+
         profiler.post_profile_memory(iter_idx)
 
         lr = optimizer.param_groups[0]["lr"]

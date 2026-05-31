@@ -324,8 +324,11 @@ class PipelineParallel(nn.Module):
         if batch[0][0].shape[0] % self.chunks != 0:
             if self.global_rank == 0:
                 print("[Warning]The global batch size is not divisible by chunks, the results may be skewed.")
+        microbatches = [
+            chunk_batch(batch[0], self.chunks, kwargs),
+            chunk_batch(batch[1], self.chunks, kwargs),
+        ]
         micro_kwargs = chunk_dict(kwargs, self.chunks)
-        microbatches = [chunk_batch(batch[0], self.chunks), chunk_batch(batch[1], self.chunks)]
         self.real_chunks = len(microbatches[0])
         if self.chunks != self.real_chunks and self.chunk_warning:
             if self.global_rank == 0:
@@ -399,9 +402,12 @@ class PipelineParallel(nn.Module):
         model = self.model_cur_stage
 
         # forward_step_func = forward_step_function(loss_func,**kwargs)
-        micro_kwargs = chunk_dict(kwargs, self.chunks)
         # Chunk input batch into microbatches
-        microbatches = [chunk_batch(batch[0], self.chunks), chunk_batch(batch[1], self.chunks)]
+        microbatches = [
+            chunk_batch(batch[0], self.chunks, kwargs),
+            chunk_batch(batch[1], self.chunks, kwargs),
+        ]
+        micro_kwargs = chunk_dict(kwargs, self.chunks)
         self.real_chunks = len(microbatches[0])
         if self.chunks != self.real_chunks and self.chunk_warning:
             if self.global_rank == 0:
@@ -738,9 +744,12 @@ class PipelineParallel(nn.Module):
         model = self.model_cur_stage
 
         # forward_step_func = forward_step_function(loss_func,**kwargs)
-        micro_kwargs = chunk_dict(kwargs, self.chunks)
         # Chunk input batch into microbatches
-        microbatches = [chunk_batch(batch[0], self.chunks), chunk_batch(batch[1], self.chunks)]
+        microbatches = [
+            chunk_batch(batch[0], self.chunks, kwargs),
+            chunk_batch(batch[1], self.chunks, kwargs),
+        ]
+        micro_kwargs = chunk_dict(kwargs, self.chunks)
         self.real_chunks = len(microbatches[0])
         if self.chunks != self.real_chunks and self.chunk_warning:
             if self.global_rank == 0:

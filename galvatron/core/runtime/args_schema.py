@@ -293,6 +293,29 @@ class CommonDataArgs(BaseModel):
         description="Weight-prefix list for an independent test dataset.",
     )
 
+    data_source: Literal["megatron", "hf", "dummy"] = Field(
+        default="megatron",
+        description="Choice of training data pipeline.",
+    )
+
+    # HuggingFace dataset args
+    hf_text_keys: Optional[str] = Field(default=None, description="Text keys for HuggingFace dataset.")
+    hf_collator_mode: Optional[Literal["packing", "padding"]] = Field(default="padding", description="HuggingFace collator mode.")
+    hf_shuffle_buffer_size: Optional[int] = Field(default=0, description="Shuffle buffer size for HuggingFace dataset.")
+    hf_num_workers: Optional[int] = Field(default=0, description="Number of workers for HuggingFace dataset.")
+    hf_prefetch_factor: Optional[int] = Field(default=2, description="Prefetch factor for HuggingFace dataset.")
+    hf_data_mode: Literal["prefetch", "iterable", "mapping", "dyn_bsz"] = Field(
+        default="prefetch",
+        description="HF pipeline when data_source is hf. "
+                    "Accepts: (1) prefetch (multiprocess buffer), (2) iterable (streaming + DataLoader), "
+                    "(3) mapping (materialized HFDataset + DataLoader), (4) dyn_bsz (dynamic batch size).",
+    )
+
+    # Dummy data args
+    dummy_sample_mode: Literal["fix_length", "varlen_length"] = Field(default="fix_length", description="Mode for generating dummy samples.")
+    dummy_collate_mode: Literal["pack", "padding"] = Field(default="padding", description="Collation mode for dummy data.")
+    dummy_dyn_bsz: bool = Field(default=False, description="Whether to use dynamic batch size for dummy data.")
+
     @field_validator("data_path", "train_data_path", "valid_data_path", "test_data_path", mode="before")
     @classmethod
     def str_to_list(cls, v):
