@@ -4,6 +4,7 @@ from typing import List, Tuple, Callable
 import torch
 from torch import Tensor
 from galvatron.core.runtime.parallel_state import get_args, get_tokenizer
+import galvatron.core.runtime.parallel_state as parallel_state
 
 # from .loss_func import hf_packing_loss_func
 
@@ -16,22 +17,21 @@ class PackingCollator:
     """
     Fixed-shape packing collator for HF data. ``batch`` is a flat list of 1D
     token tensors whose length is a multiple of ``chunks``; consecutive
-    ``len(batch) // chunks`` samples form one micro-batch chunk and each
-    chunk is padded to a multiple of ``align_to`` (default 8) tokens. The
-    padding is appended to the last sample's segment so it belongs to the
-    same sequence in ``cu_seqlens``, with ``labels = IGNORE_INDEX`` and
-    ``loss_masks = 0``.
+    ``len(batch) // chunks`` samples form one micro-batch chunk.
+
+    Each sample is padded to a multiple of ``vocab_cp_size * 2`` tokens so
+    that zigzag CP splitting is aligned.  Padding tokens use ``labels =
+    IGNORE_INDEX`` and ``loss_masks = 0`` and are appended to the sample
+    they belong to in ``cu_seqlens``.
 
     Output dict mirrors ``DynamicBatchCollator`` but without
     ``cu_seqlens_chunks`` — chunk boundaries are implicit since every chunk
     holds the same number of real samples.
     """
 
-    def __init__(self, chunks: int, align_to: int = 8):
+    def __init__(self, chunks: int):
         assert chunks >= 1, f"chunks must be >= 1, got {chunks}"
-        assert align_to >= 1, f"align_to must be >= 1, got {align_to}"
         self.chunks = chunks
-        self.align_to = align_to
 
     def __call__(self, batch: List[Tensor]) -> dict:
         assert len(batch) % self.chunks == 0, (
@@ -39,33 +39,49 @@ class PackingCollator:
         )
         samples_per_chunk = len(batch) // self.chunks
 
+        cp_size = parallel_state.get_vocab_cp_world_size()
+        cp_pad_multiple = cp_size * 2 if cp_size > 1 else 1
+        tp_sp_size = parallel_state.get_vocab_tp_sp_world_size()
+
         input_ids_parts: List[Tensor] = []
         labels_parts: List[Tensor] = []
         loss_masks_parts: List[Tensor] = []
         sample_lengths: List[int] = []
+        dtype = None
 
-        for c in range(self.chunks):
-            chunk_tokens = 0
-            chunk_dtype = None
+        for chunk_idx in range(self.chunks):
+            chunk_start = len(sample_lengths)
+
             for i in range(samples_per_chunk):
-                t = batch[c * samples_per_chunk + i].view(-1)
+                t = batch[chunk_idx * samples_per_chunk + i].view(-1)
+                n_orig = t.numel()
+                dtype = t.dtype
+
                 input_ids_parts.append(t)
-                labels = torch.empty_like(t, dtype=t.dtype)
+                labels = torch.empty_like(t)
                 labels[:-1] = t[1:]
                 labels[-1] = IGNORE_INDEX
                 labels_parts.append(labels)
                 loss_masks_parts.append(torch.ones_like(t, dtype=torch.float32))
-                sample_lengths.append(t.numel())
-                chunk_tokens += t.numel()
-                chunk_dtype = t.dtype
 
-            # Pad this chunk up to a multiple of ``align_to`` tokens, appended
-            # to the last sample's segment.
-            remainder = chunk_tokens % self.align_to
-            if remainder != 0 and chunk_tokens > 0:
-                pad_len = self.align_to - remainder
-                input_ids_parts.append(torch.zeros(pad_len, dtype=chunk_dtype))
-                labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=chunk_dtype))
+                if cp_pad_multiple > 1:
+                    rem = n_orig % cp_pad_multiple
+                    if rem != 0:
+                        pad_len = cp_pad_multiple - rem
+                        input_ids_parts.append(torch.zeros(pad_len, dtype=dtype))
+                        labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=dtype))
+                        loss_masks_parts.append(torch.zeros(pad_len, dtype=torch.float32))
+                        n_orig += pad_len
+
+                sample_lengths.append(n_orig)
+
+            # Pad chunk total to multiple of tp_sp_size
+            chunk_tokens = sum(sample_lengths[chunk_start:])
+            rem = chunk_tokens % tp_sp_size
+            if rem != 0:
+                pad_len = tp_sp_size - rem
+                input_ids_parts.append(torch.zeros(pad_len, dtype=dtype))
+                labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=dtype))
                 loss_masks_parts.append(torch.zeros(pad_len, dtype=torch.float32))
                 sample_lengths[-1] += pad_len
 
@@ -149,18 +165,15 @@ class DynamicBatchCollator:
     """
     Dyn-bsz pack collator for HF data. Input is a list of ``num_microbatches``
     buckets, each a list of variable-length 1D token tensors. Each bucket is
-    packed into one micro-batch and then padded so that its token count is a
-    multiple of ``align_to`` (default 8); the padding is appended to the last
-    sample's segment in ``cu_seqlens``, with ``loss_masks = 0`` and
-    ``labels = IGNORE_INDEX`` to keep it out of the loss.
+    packed into one micro-batch.  Each sample is padded to a multiple of
+    ``vocab_cp_size * 2`` and each bucket is padded to a multiple of
+    ``vocab_tp_sp_size``.  Padding is appended to the last sample in the
+    bucket with ``loss_masks = 0`` and ``labels = IGNORE_INDEX``.
 
     Output dict:
 
-    - ``input_ids`` / ``labels`` / ``loss_masks``: ``(1, total_T)`` tensors,
-      where ``total_T`` is the sum of per-bucket aligned token counts.
-    - ``cu_seqlens``: ``List[int]`` of length ``N+1``, every inner-sample
-      boundary (including the per-bucket pad slot when present) across the
-      whole pack.
+    - ``input_ids`` / ``labels`` / ``loss_masks``: ``(1, total_T)`` tensors.
+    - ``cu_seqlens``: ``List[int]`` of length ``N+1``.
     - ``cu_seqlens_chunks``: ``List[int]`` of length ``num_microbatches+1``,
       indices into ``cu_seqlens`` marking micro-batch ends.
 
@@ -169,40 +182,56 @@ class DynamicBatchCollator:
     tensors on the consumer side if downstream code needs them.
     """
 
-    def __init__(self, align_to: int = 8):
-        assert align_to >= 1, f"align_to must be >= 1, got {align_to}"
-        self.align_to = align_to
+    def __init__(self):
+        pass
 
     def __call__(self, buckets: List[List[Tensor]]) -> dict:
+        cp_size = parallel_state.get_vocab_cp_world_size()
+        cp_pad_multiple = cp_size * 2 if cp_size > 1 else 1
+        tp_sp_size = parallel_state.get_vocab_tp_sp_world_size()
+
         input_ids_parts: List[Tensor] = []
         labels_parts: List[Tensor] = []
         loss_masks_parts: List[Tensor] = []
         sample_lengths: List[int] = []
         chunk_sample_offsets: List[int] = [0]
+        dtype = None
 
         for bucket in buckets:
-            bucket_tokens = 0
-            bucket_dtype = None
+            bucket_start = len(sample_lengths)
+
             for t in bucket:
+                n_orig = t.numel()
+                dtype = t.dtype
+
                 input_ids_parts.append(t)
-                labels = torch.empty_like(t, dtype=t.dtype)
+                labels = torch.empty_like(t)
                 labels[:-1] = t[1:]
                 labels[-1] = IGNORE_INDEX
                 labels_parts.append(labels)
                 loss_masks_parts.append(torch.ones_like(t, dtype=torch.float32))
-                sample_lengths.append(t.numel())
-                bucket_tokens += t.numel()
-                bucket_dtype = t.dtype
 
-            # Pad the bucket up to a multiple of ``align_to`` tokens, appended
-            # to the last sample's segment.
-            remainder = bucket_tokens % self.align_to
-            if remainder != 0 and bucket_tokens > 0:
-                pad_len = self.align_to - remainder
-                input_ids_parts.append(torch.zeros(pad_len, dtype=bucket_dtype))
-                labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=bucket_dtype))
+                if cp_pad_multiple > 1:
+                    rem = n_orig % cp_pad_multiple
+                    if rem != 0:
+                        pad_len = cp_pad_multiple - rem
+                        input_ids_parts.append(torch.zeros(pad_len, dtype=dtype))
+                        labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=dtype))
+                        loss_masks_parts.append(torch.zeros(pad_len, dtype=torch.float32))
+                        n_orig += pad_len
+
+                sample_lengths.append(n_orig)
+
+            # Pad bucket total to multiple of tp_sp_size
+            bucket_tokens = sum(sample_lengths[bucket_start:])
+            rem = bucket_tokens % tp_sp_size
+            if rem != 0:
+                pad_len = tp_sp_size - rem
+                input_ids_parts.append(torch.zeros(pad_len, dtype=dtype))
+                labels_parts.append(torch.full((pad_len,), IGNORE_INDEX, dtype=dtype))
                 loss_masks_parts.append(torch.zeros(pad_len, dtype=torch.float32))
                 sample_lengths[-1] += pad_len
+
             chunk_sample_offsets.append(len(sample_lengths))
 
         input_ids = torch.cat(input_ids_parts, dim=0).unsqueeze(0).contiguous()

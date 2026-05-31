@@ -47,19 +47,22 @@ def chunk_batch(batch: Dict[str, torch.Tensor], chunks: int) -> List[Dict[str, t
     return micro_batches
 
 
-def text_loss_func(label:List, ce_loss: List[torch.Tensor], micro_loss_masks: List[torch.Tensor]):
+def text_loss_func(label:List, ce_loss: List[torch.Tensor], micro_loss_masks: List[torch.Tensor],
+                   effective_tokens: int = None, chunks: int = 1):
     loss_mask = micro_loss_masks[0]
     micro_loss_masks.pop(0)
 
     ce_loss = ce_loss[0] # adapt to the original signature of loss_func which returns a list of ce_loss for each microbatch, but actually we only have one microbatch's ce_loss here since chunking is done outside in the training loop
     ce_loss = ce_loss.view(-1).float()
-    
-    # import torch
-    # rank = torch.distributed.get_rank()
-    # print(f'Rank {rank}, ce.loss.shape: {ce_loss.shape}, loss_mask.shape: {loss_mask.shape}', flush=True)
 
     loss_mask = loss_mask.view(-1).float()
-    local_loss = torch.sum(ce_loss * loss_mask) / loss_mask.sum()  # token level loss
+    if effective_tokens is not None:
+        # effective_tokens is per-micro-batch. Outside the training loop the
+        # micro-batch loss is divided by ``chunks`` for gradient accumulation,
+        # so we multiply by chunks here to recover the true per-token loss.
+        local_loss = torch.sum(ce_loss * loss_mask) / effective_tokens * chunks
+    else:
+        local_loss = torch.sum(ce_loss * loss_mask) / loss_mask.sum()  # token level loss
 
     ce_sum = torch.sum(ce_loss * loss_mask).detach()
     ce_count = loss_mask.sum().detach()
@@ -162,4 +165,56 @@ def get_text_batch_on_this_tp_rank(data_iterator):
 
 
 def get_text_batch_on_this_cp_rank(batch):
-    return batch  # TODO
+    """Slice batch along sequence dimension for context parallel group.
+
+    For packed (varlen) batches with ``cu_seqlens``, applies zigzag CP
+    splitting per-sample and keeps global ``cu_seqlens`` unchanged (zigzag
+    ring attention handles the division internally).
+
+    For non-packed batches, applies uniform zigzag CP splitting.
+    """
+    cp_size = parallel_state.get_vocab_cp_world_size()
+    if cp_size <= 1:
+        return batch
+
+    cp_rank = parallel_state.get_vocab_cp_rank()
+    cu_seqlens = batch.get("cu_seqlens")
+
+    if cu_seqlens is not None:
+        # --- Packed (varlen) mode: zigzag per-sample ---
+        device = batch["input_ids"].device
+
+        indices_list = []
+        for i in range(len(cu_seqlens) - 1):
+            N = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+            offset = cu_seqlens[i].item()
+            seg = N // (2 * cp_size)
+            front = torch.arange(cp_rank * seg, (cp_rank + 1) * seg, device=device)
+            back = torch.arange(N - (cp_rank + 1) * seg, N - cp_rank * seg, device=device)
+            indices_list.append(torch.cat([front, back]) + offset)
+        local_indices = torch.cat(indices_list)
+
+        for key in ("input_ids", "labels", "loss_masks"):
+            if key in batch and batch[key] is not None:
+                batch[key] = batch[key][..., local_indices].contiguous()
+
+    else:
+        # --- Non-packed mode: uniform zigzag CP split ---
+        for key, val in batch.items():
+            if val is not None:
+                seq_dim = 1 if key != "attention_mask" else 2
+                val = val.view(
+                    *val.shape[0:seq_dim],
+                    2 * cp_size,
+                    val.shape[seq_dim] // (2 * cp_size),
+                    *val.shape[(seq_dim + 1) :],
+                )
+                index = torch.tensor(
+                    [cp_rank, (2 * cp_size - cp_rank - 1)],
+                    device="cpu", pin_memory=True,
+                ).cuda(non_blocking=True)
+                val = val.index_select(seq_dim, index)
+                val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
+                batch[key] = val
+
+    return batch

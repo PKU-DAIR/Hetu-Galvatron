@@ -94,7 +94,8 @@ class DynBszPrefetchBuffer:
         self.token_capacity = token_capacity
         self.num_microbatches = num_microbatches
 
-        max_packed = token_capacity * num_microbatches
+        # +1024: headroom for per-sample / per-bucket alignment padding (CP + SP).
+        max_packed = token_capacity * num_microbatches + 1024
         self.entries = []
         for _ in range(num_entries):
             entry = {

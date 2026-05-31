@@ -81,7 +81,8 @@ class PrefetchBuffer:
                 "valid_lens": torch.zeros(bs, dtype=torch.long),
             }
         else:  # packing
-            max_packed = bs * sl
+            # +1024: headroom for per-sample / per-bucket alignment padding (CP + SP).
+            max_packed = bs * sl + 1024
             entry = {
                 "input_ids": torch.zeros(1, max_packed, dtype=torch.long),
                 "labels": torch.zeros(1, max_packed, dtype=torch.long),

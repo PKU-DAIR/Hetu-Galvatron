@@ -3,6 +3,8 @@ from typing import Dict
 import torch
 from torch.utils.data import Dataset
 
+import galvatron.core.runtime.parallel_state as parallel_state
+
 
 # Ignore index for labels (no loss on padding / last position).
 IGNORE_INDEX = 0 # TODO: set another value
@@ -29,13 +31,15 @@ class DummyTextDataset(Dataset):
         sample_mode: str = "fix_length",
         collate_mode: str = "padding",
         min_sequence_length: int = 16,
-        align_to: int = 8,
     ):
+        sp_size = parallel_state.get_vocab_tp_sp_world_size()
+        cp_size = parallel_state.get_vocab_cp_world_size()
+        align_to = sp_size * cp_size * 2
         assert sample_mode in ("fix_length", "varlen_length"), f"sample_mode must be 'fix_length' or 'varlen_length', got {sample_mode!r}"
         assert collate_mode in ("padding", "pack"), f"collate_mode must be 'padding' or 'pack', got {collate_mode!r}"
         assert sequence_length % align_to == 0, f"sequence_length ({sequence_length}) must be a multiple of align_to ({align_to})"
         assert 1 <= min_sequence_length <= sequence_length, f"min_sequence_length ({min_sequence_length}) must be in [1, sequence_length={sequence_length}]"
-        
+
         self.size = size
         self.sequence_length = sequence_length
         self.vocab_size = vocab_size
@@ -127,7 +131,6 @@ def build_dummy_text_dataset(
     sample_mode: str = "fix_length",
     collate_mode: str = "padding",
     min_sequence_length: int = 16,
-    align_to: int = 8,
     dp_rank: int = 0,
     dp_world_size: int = 1,
 ) -> Dataset:
@@ -138,7 +141,6 @@ def build_dummy_text_dataset(
         sample_mode=sample_mode,
         collate_mode=collate_mode,
         min_sequence_length=min_sequence_length,
-        align_to=align_to,
     )
     return DPAwareDataset(
         dataset=base_dataset,

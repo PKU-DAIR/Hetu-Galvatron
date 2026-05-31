@@ -2,6 +2,8 @@ from typing import List, Optional, Union
 
 import torch
 
+import galvatron.core.runtime.parallel_state as parallel_state
+
 
 def listify_model(model: Union[torch.nn.Module, List[torch.nn.Module]]) -> List[torch.nn.Module]:
     if isinstance(model, list):
@@ -89,14 +91,8 @@ def chunk_batch_for_pack(inputs, chunks, cu_seqlens):
     if inputs is None:
         return inputs
 
-    # NOTE: the shape here is intentionally awkward — input_ids is wrapped in a single-element
-    # list purely to stay compatible with the previous chunk_batch_for_padding contract (which
-    # takes a list of positional inputs and returns a list-of-lists). That's the only reason
-    # for the extra `[...]` layer; otherwise we'd just pass the tensor directly.
     assert len(inputs) == 1, (
-        f"expected a single packed input_ids tensor wrapped in a list (the extra list layer "
-        f"is kept only for compatibility with chunk_batch_for_padding's prior contract), "
-        f"got len(inputs)={len(inputs)}"
+        f"expected a single packed input_ids tensor wrapped in a list, got len(inputs)={len(inputs)}"
     )
     real_inputs = inputs[0]
 
@@ -105,10 +101,14 @@ def chunk_batch_for_pack(inputs, chunks, cu_seqlens):
         raise RuntimeError(f"Batch size {batch_size} must be divisible by chunks {chunks}")
     samples_per_chunk = batch_size // chunks
 
+    # cu_seqlens is global; data has already been CP-split so local token
+    # positions are global_offset / cp_size.
+    cp_size = parallel_state.get_vocab_cp_world_size()
+
     batches = []
     for i in range(chunks):
-        t_start = int(cu_seqlens[i * samples_per_chunk].item())
-        t_end = int(cu_seqlens[(i + 1) * samples_per_chunk].item())
+        t_start = int(cu_seqlens[i * samples_per_chunk].item()) // cp_size
+        t_end = int(cu_seqlens[(i + 1) * samples_per_chunk].item()) // cp_size
         batches.append([real_inputs[:, t_start:t_end]])
 
     return batches
@@ -126,15 +126,17 @@ def chunk_dict_for_pack(kwargs, chunks):
     if batch_size % chunks != 0:
         raise RuntimeError(f"Batch size {batch_size} must be divisible by chunks {chunks}")
 
+    cp_size = parallel_state.get_vocab_cp_world_size()
+
     batches = []
     samples_per_chunk = batch_size // chunks
     for i in range(chunks):
-        t_start = int(cu_seqlens[i * samples_per_chunk].item())
-        t_end = int(cu_seqlens[(i + 1) * samples_per_chunk].item())
+        t_start = int(cu_seqlens[i * samples_per_chunk].item()) // cp_size
+        t_end = int(cu_seqlens[(i + 1) * samples_per_chunk].item()) // cp_size
         batch = {
             "labels": kwargs["labels"][:, t_start:t_end],
-            "cu_seqlens": cu_seqlens[i * samples_per_chunk:(i + 1) * samples_per_chunk + 1] - t_start,
-            "rotary_embedding": kwargs["rotary_embedding"], # rotary_embedding is the same for all chunks since it's based on max_seq_len, not actual seq_len. We can optimize this later if needed by chunking the rotary_embedding as well, but it should be fine since it's usually small compared to input_ids and labels.
+            "cu_seqlens": cu_seqlens[i * samples_per_chunk:(i + 1) * samples_per_chunk + 1] - t_start * cp_size,
+            "rotary_embedding": kwargs["rotary_embedding"],
         }
         batches.append(batch)
 
@@ -142,12 +144,7 @@ def chunk_dict_for_pack(kwargs, chunks):
 
 
 def chunk_batch_for_dyn_bsz(inputs, chunks, cu_seqlens, cu_seqlens_chunks):
-    """
-    Pack-mode chunking for dyn_bsz: each micro-batch has its own (possibly
-    unequal) number of inner samples, given by ``cu_seqlens_chunks`` — an
-    array of indices into ``cu_seqlens`` marking micro-batch boundaries
-    (shape ``(chunks + 1,)``).
-    """
+    """Pack-mode chunking for dyn_bsz (see chunk_dict_for_dyn_bsz)."""
     if inputs is None:
         return inputs
 
@@ -160,25 +157,21 @@ def chunk_batch_for_dyn_bsz(inputs, chunks, cu_seqlens, cu_seqlens_chunks):
         f"cu_seqlens_chunks length {cu_seqlens_chunks.numel()} != chunks+1 ({chunks + 1})"
     )
 
+    cp_size = parallel_state.get_vocab_cp_world_size()
+
     batches = []
     for i in range(chunks):
         s_start = int(cu_seqlens_chunks[i].item())
         s_end = int(cu_seqlens_chunks[i + 1].item())
-        t_start = int(cu_seqlens[s_start].item())
-        t_end = int(cu_seqlens[s_end].item())
+        t_start = int(cu_seqlens[s_start].item()) // cp_size
+        t_end = int(cu_seqlens[s_end].item()) // cp_size
         batches.append([real_inputs[:, t_start:t_end]])
 
     return batches
 
 
 def chunk_dict_for_dyn_bsz(kwargs, chunks):
-    """
-    Pack-mode kwargs chunking for dyn_bsz. Mirrors ``chunk_dict_for_pack`` but
-    uses ``cu_seqlens_chunks`` to determine non-uniform per-micro-batch sample
-    counts. ``cu_seqlens_chunks`` itself is consumed here (not forwarded into
-    each micro-batch's kwargs, since the per-micro ``cu_seqlens`` is already
-    local).
-    """
+    """Pack-mode kwargs chunking for dyn_bsz (see chunk_dict_for_pack)."""
     expected_keys = {"labels", "cu_seqlens", "cu_seqlens_chunks", "rotary_embedding"}
     assert set(kwargs.keys()) == expected_keys, (
         f"kwargs must contain {expected_keys} in dyn_bsz pack mode, got {list(kwargs.keys())}"
@@ -193,15 +186,17 @@ def chunk_dict_for_dyn_bsz(kwargs, chunks):
         f"cu_seqlens_chunks length {cu_seqlens_chunks.numel()} != chunks+1 ({chunks + 1})"
     )
 
+    cp_size = parallel_state.get_vocab_cp_world_size()
+
     batches = []
     for i in range(chunks):
         s_start = int(cu_seqlens_chunks[i].item())
         s_end = int(cu_seqlens_chunks[i + 1].item())
-        t_start = int(cu_seqlens[s_start].item())
-        t_end = int(cu_seqlens[s_end].item())
+        t_start = int(cu_seqlens[s_start].item()) // cp_size
+        t_end = int(cu_seqlens[s_end].item()) // cp_size
         batch = {
             "labels": kwargs["labels"][:, t_start:t_end],
-            "cu_seqlens": cu_seqlens[s_start:s_end + 1] - t_start,
+            "cu_seqlens": cu_seqlens[s_start:s_end + 1] - t_start * cp_size,
             "rotary_embedding": kwargs["rotary_embedding"],
         }
         batches.append(batch)

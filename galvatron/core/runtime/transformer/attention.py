@@ -160,10 +160,11 @@ class Attention(torch.nn.Module, ABC):
             sp_world_size = 1
         else:
             sp_world_size = get_parallel_world_size(sp_group)
-        if sp_world_size > 1:
-            self.use_ulysses = True
-        else:
-            self.use_ulysses = False
+        # if sp_world_size > 1:
+        #     self.use_ulysses = True
+        # else:
+        #     self.use_ulysses = False
+        self.use_ulysses = args.parallel.use_ulysses
         if cp_group is None:
             cp_world_size = 1
         else:
@@ -710,7 +711,7 @@ class Attention(torch.nn.Module, ABC):
                     #     with tensor_parallel.get_cuda_rng_tracker().fork():
                     #         core_attn_out = self.flash_attention(q, k, v)
                     # else:
-                    core_attn_out = self.flash_attention(q, k, v, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_kv)
+                    core_attn_out = self.flash_attention(q, k, v, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv)
                     core_attn_out = rearrange(core_attn_out, "b s h d -> s b (h d)").contiguous()
             else:
                 if self.use_flash_attn:
@@ -727,7 +728,7 @@ class Attention(torch.nn.Module, ABC):
                         rearrange(x, "s b ... -> b s ...").contiguous() for x in (query, key, value)
                     ]
 
-                    context_layer = self.dist_attn(q, k, v, batch_dim_idx, cu_seqlens_q=cu_seqlens_q, cu_seqlens_k=cu_seqlens_kv)
+                    context_layer = self.dist_attn(q, k, v, batch_dim_idx, cu_seqlens_q=cu_seqlens_q, cu_seqlens_kv=cu_seqlens_kv)
                     context_layer = rearrange(context_layer, "b s h d -> s b (h d)").contiguous()
                     core_attn_out = context_layer
                 else:

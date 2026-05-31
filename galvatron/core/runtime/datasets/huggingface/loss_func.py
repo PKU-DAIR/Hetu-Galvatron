@@ -21,6 +21,8 @@ def hf_loss_func(
     label: List,
     ce_loss: List[torch.Tensor],
     micro_loss_masks: List[torch.Tensor],
+    effective_tokens: int,
+    chunks: int,
 ):
     loss_mask = micro_loss_masks[0]
     micro_loss_masks.pop(0)
@@ -30,7 +32,11 @@ def hf_loss_func(
     ce_loss = ce_loss.view(-1).float()
 
     loss_mask = loss_mask.view(-1).float()
-    local_loss = torch.sum(ce_loss * loss_mask) / loss_mask.sum()  # token-level loss
+    # local_loss = torch.sum(ce_loss * loss_mask) / loss_mask.sum()  # token-level loss
+    # effective_tokens is per-micro-batch. Outside the training loop the
+    # micro-batch loss is divided by ``chunks`` for gradient accumulation,
+    # so we multiply by chunks here to recover the true per-token loss.
+    local_loss = torch.sum(ce_loss * loss_mask) / effective_tokens * chunks
 
     ce_sum = torch.sum(ce_loss * loss_mask).detach()
     ce_count = loss_mask.sum().detach()

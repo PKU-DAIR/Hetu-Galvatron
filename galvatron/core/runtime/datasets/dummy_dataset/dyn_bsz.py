@@ -4,6 +4,8 @@ from typing import Dict, List, Optional
 import torch
 from torch.utils.data import Dataset
 
+import galvatron.core.runtime.parallel_state as parallel_state
+
 from .dataset import IGNORE_INDEX, DPAwareDataset
 
 
@@ -40,9 +42,11 @@ class VarLenTextDataset(Dataset):
         length_file: Optional[str] = None,
         max_seq_length: int = 4096,
         vocab_size: int = 32000,
-        align_to: int = 1,
         size: Optional[int] = None,
     ):
+        sp_size = parallel_state.get_vocab_tp_sp_world_size()
+        cp_size = parallel_state.get_vocab_cp_world_size()
+        align_to = sp_size * cp_size * 2
         assert max_seq_length >= 1, f"max_seq_length must be >= 1, got {max_seq_length}"
         assert align_to >= 1, f"align_to must be >= 1, got {align_to}"
         assert max_seq_length % align_to == 0, f"max_seq_length ({max_seq_length}) must be a multiple of align_to ({align_to})"
@@ -219,7 +223,6 @@ def build_dynamic_batch_dataset(
     max_seq_length: int = 4096,
     token_capacity: int = 4096,
     vocab_size: int = 32000,
-    align_to: int = 1,
     size: Optional[int] = None,
     dp_rank: int = 0,
     dp_world_size: int = 1,
@@ -228,7 +231,6 @@ def build_dynamic_batch_dataset(
         length_file=length_file,
         max_seq_length=max_seq_length,
         vocab_size=vocab_size,
-        align_to=align_to,
         size=size,
     )
     packed_dataset = DynamicBatchDataset(

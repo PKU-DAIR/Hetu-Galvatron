@@ -206,12 +206,15 @@ class RotaryEmbedding(nn.Module):
             )
         # emb [seq_length, .., dim]
         emb = emb[:, None, None, :]
-        if self.cp_group is not None:
-            emb = get_pos_emb_on_this_cp_sp_rank_galvatron(self.cp_group, self.sp_group, emb, 0)
-        else:
-            if parallel_state.get_vocab_cp_world_size() > 1 and not packed_seq:
-                # slice rotary_pos_emb along sequence dimension and select the parition of the current CP rank
-                emb = get_pos_emb_on_this_cp_rank(emb, 0)
+        # CP/SP reduction of freqs has been moved to the downstream
+        # apply_rotary_pos_emb / _apply_rotary_pos_emb_thd, which handles
+        # per-sample zigzag selection via cu_seqlens and cp_group.
+        # if self.cp_group is not None:
+        #     emb = get_pos_emb_on_this_cp_sp_rank_galvatron(self.cp_group, self.sp_group, emb, 0)
+        # else:
+        #     if parallel_state.get_vocab_cp_world_size() > 1 and not packed_seq:
+        #         # slice rotary_pos_emb along sequence dimension and select the parition of the current CP rank
+        #         emb = get_pos_emb_on_this_cp_rank(emb, 0)
         return emb
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):

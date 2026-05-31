@@ -82,38 +82,8 @@ def train(args):
     for iter_idx in range(getattr(args.train, "iteration", 0), args.train.train_iters):
         tokens, kwargs, loss_func = get_batch(train_data_iterator)
 
-        if rank in (0, 1) and args.data.data_source != "megatron":
-            print(f"[rank {rank}][iter {iter_idx}] tokens.shape={tuple(tokens.shape)}", flush=True)
-            for k, v in kwargs.items():
-                if isinstance(v, torch.Tensor):
-                    print(f"[rank {rank}][iter {iter_idx}] kwargs[{k!r}].shape={tuple(v.shape)}", flush=True)
-                else:
-                    print(f"[rank {rank}][iter {iter_idx}] kwargs[{k!r}]={v}", flush=True)
-
-            cu_seqlens = kwargs.get("cu_seqlens")
-            cu_seqlens_chunks = kwargs.get("cu_seqlens_chunks")
-            if cu_seqlens is not None:
-                _cu = cu_seqlens.tolist()
-                _sample_lens = [_cu[i + 1] - _cu[i] for i in range(len(_cu) - 1)]
-                if cu_seqlens_chunks is not None:
-                    _cuc = cu_seqlens_chunks.tolist()
-                    _per_chunk_sample_lens = [
-                        _sample_lens[_cuc[i] : _cuc[i + 1]] for i in range(len(_cuc) - 1)
-                    ]
-                    _chunk_lens = [sum(s) for s in _per_chunk_sample_lens]
-                    print(
-                        f"[rank {rank}][iter {iter_idx}] per-sample lens={_sample_lens} "
-                        f"per-chunk sample lens={_per_chunk_sample_lens} "
-                        f"per-chunk token counts={_chunk_lens}",
-                        flush=True,
-                    )
-                else:
-                    print(f"[rank {rank}][iter {iter_idx}] per-sample lens={_sample_lens}", flush=True)
-
         profiler.profile_time_start(iter_idx)
         profiler.profile_memory(iter_idx, "Before Forward")
-
-        # continue # 临时
 
         loss = model.forward_backward([tokens], iter_idx, profiler, loss_func=loss_func, **kwargs)
 

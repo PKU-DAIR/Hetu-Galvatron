@@ -17,25 +17,11 @@ from .utils import get_text_batch_on_this_tp_rank, get_text_batch_on_this_cp_ran
 def get_dummy_text_data_iterator(
     args = None,
     dataset_size: int = 512,
-    align_to: int = 8,
 ):
     """
     Build an infinite data iterator for dummy text training.
 
-    Args:
-        dp_rank: Current data-parallel rank.
-        dp_world_size: Total number of data-parallel ranks.
-        global_batch_size: Global batch size across all DP ranks.
-        dataset_size: Number of synthetic samples in the base dataset.
-        sequence_length: Maximum sequence length per sample.
-        vocab_size: Vocabulary size for input_ids.
-        sample_mode: ``fix_length`` or ``varlen_length``.
-        collate_mode: ``padding`` or ``pack``.
-        min_sequence_length: Minimum sequence length when using ``varlen_length``.
-        align_to: Sequence lengths will be multiples of this value.
-
-    Returns:
-        An iterator that yields batches indefinitely.
+    ``align_to`` is computed internally as ``sp_size * cp_size * 2``.
     """
     dp_rank = parallel_state.get_vocab_dp_rank()
     dp_world_size = parallel_state.get_vocab_dp_world_size()
@@ -47,7 +33,6 @@ def get_dummy_text_data_iterator(
         sample_mode=args.data.dummy_sample_mode,
         collate_mode=args.data.dummy_collate_mode,
         min_sequence_length=args.train.seq_length // 2,
-        align_to=align_to,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
     )
@@ -93,6 +78,7 @@ def get_dummy_text_batch(
     cu_seqlens = batch.get("cu_seqlens")
 
     # Chunk loss_masks for the per-microbatch loss function.
+    cp_size = parallel_state.get_vocab_cp_world_size()
     if cu_seqlens is None:
         # padding mode: slice along the batch dim.
         B = loss_masks.shape[0]
@@ -106,9 +92,11 @@ def get_dummy_text_batch(
         samples_per_chunk = num_samples // chunks
         micro_loss_masks = []
         for i in range(chunks):
-            t_start = int(cu_seqlens[i * samples_per_chunk].item())
-            t_end = int(cu_seqlens[(i + 1) * samples_per_chunk].item())
+            t_start = int(cu_seqlens[i * samples_per_chunk].item()) // cp_size
+            t_end = int(cu_seqlens[(i + 1) * samples_per_chunk].item()) // cp_size
             micro_loss_masks.append(loss_masks[:, t_start:t_end])
+
+    effective_tokens = int(loss_masks.sum().item())
 
     return (
         batch.get('input_ids'),
@@ -116,18 +104,19 @@ def get_dummy_text_batch(
             'labels': batch.get("labels"),
             'cu_seqlens': batch.get("cu_seqlens"),
         },
-        partial(text_loss_func, micro_loss_masks=micro_loss_masks),
+        partial(text_loss_func, micro_loss_masks=micro_loss_masks, effective_tokens=effective_tokens, chunks=chunks),
     )
 
 
 def get_dynamic_batch_data_iterator(
     args,
     length_file: Optional[str] = None,
-    align_to: int = 8,
     dataset_size: int = None,
 ):
     """
     Build an infinite data iterator for dynamic-batch-size training.
+
+    ``align_to`` is computed internally as ``sp_size * cp_size * 2``.
 
     Each item produced by the underlying ``DynamicBatchDataset`` packs as many
     variable-length samples (from ``length_file``) as fit within
@@ -159,7 +148,6 @@ def get_dynamic_batch_data_iterator(
         max_seq_length=sequence_length,
         token_capacity=token_capacity,
         vocab_size=vocab_size,
-        align_to=align_to,
         size=dataset_size,
         dp_rank=dp_rank,
         dp_world_size=dp_world_size,
@@ -221,11 +209,14 @@ def get_dynamic_batch(
     )
 
     # Slice loss_masks per micro-batch along the token dim using chunk boundaries.
+    cp_size = parallel_state.get_vocab_cp_world_size()
     micro_loss_masks: List[torch.Tensor] = []
     for i in range(chunks):
-        t_start = int(cu_seqlens[int(cu_seqlens_chunks[i].item())].item())
-        t_end = int(cu_seqlens[int(cu_seqlens_chunks[i + 1].item())].item())
+        t_start = int(cu_seqlens[int(cu_seqlens_chunks[i].item())].item()) // cp_size
+        t_end = int(cu_seqlens[int(cu_seqlens_chunks[i + 1].item())].item()) // cp_size
         micro_loss_masks.append(loss_masks[:, t_start:t_end])
+
+    effective_tokens = int(loss_masks.sum().item())
 
     return (
         batch["input_ids"],
@@ -234,5 +225,5 @@ def get_dynamic_batch(
             "cu_seqlens": cu_seqlens,
             "cu_seqlens_chunks": cu_seqlens_chunks,
         },
-        partial(text_loss_func, micro_loss_masks=micro_loss_masks),
+        partial(text_loss_func, micro_loss_masks=micro_loss_masks, effective_tokens=effective_tokens, chunks=chunks),
     )

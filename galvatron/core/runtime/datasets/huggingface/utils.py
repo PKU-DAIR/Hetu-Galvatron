@@ -156,4 +156,70 @@ def get_batch_on_this_tp(data_iterator) -> Dict[str, torch.Tensor]:
 
 
 def get_batch_on_this_cp_rank(batch):
-    pass
+    """Slice batch along sequence dimension for context parallel group.
+
+    For packed (varlen) batches with ``cu_seqlens``, applies zigzag CP
+    splitting per-sample and updates ``cu_seqlens`` to local lengths.
+    For non-packed batches, applies uniform zigzag CP splitting (same as
+    the reference in ``galvatron.core.runtime.utils.utils``).
+    """
+    cp_size = parallel_state.get_vocab_cp_world_size()
+    if cp_size <= 1:
+        return batch
+
+    cp_rank = parallel_state.get_vocab_cp_rank()
+    cu_seqlens = batch.get("cu_seqlens")
+
+    if cu_seqlens is not None:
+        # --- Packed (varlen) mode: zigzag per-sample ---
+        # cp_rank r owns [r*seg, (r+1)*seg) ∪ [N-(r+1)*seg, N-r*seg) for
+        # each sample of length N, where seg = N // (2*cp_size).
+        device = batch["input_ids"].device
+
+        global_total = batch["input_ids"].shape[-1]
+        sample_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).tolist()
+
+        indices_list = []
+        local_lens = []
+        for i in range(len(cu_seqlens) - 1):
+            N = (cu_seqlens[i + 1] - cu_seqlens[i]).item()
+            offset = cu_seqlens[i].item()
+            seg = N // (2 * cp_size)
+            front = torch.arange(cp_rank * seg, (cp_rank + 1) * seg, device=device)
+            back = torch.arange(N - (cp_rank + 1) * seg, N - cp_rank * seg, device=device)
+            indices_list.append(torch.cat([front, back]) + offset)
+            local_lens.append(front.numel() + back.numel())
+        local_indices = torch.cat(indices_list)
+
+        # Slice sequence-dim tensors
+        for key in ("input_ids", "labels", "loss_masks"):
+            if key in batch and batch[key] is not None:
+                # shape [B, T] or [T] — slice along last dim
+                batch[key] = batch[key][..., local_indices].contiguous()
+
+        local_total = batch["input_ids"].shape[-1]
+        print(f"[CP] rank={cp_rank} cp_size={cp_size} "
+              f"global_total={global_total} local_total={local_total} "
+              f"sample_lens={sample_lens} local_lens={local_lens} "
+              f"cu_seqlens={cu_seqlens.tolist()}", flush=True)
+
+    else:
+        # --- Non-packed mode: uniform zigzag CP split ---
+        for key, val in batch.items():
+            if val is not None:
+                seq_dim = 1 if key != "attention_mask" else 2
+                val = val.view(
+                    *val.shape[0:seq_dim],
+                    2 * cp_size,
+                    val.shape[seq_dim] // (2 * cp_size),
+                    *val.shape[(seq_dim + 1) :],
+                )
+                index = torch.tensor(
+                    [cp_rank, (2 * cp_size - cp_rank - 1)],
+                    device="cpu", pin_memory=True,
+                ).cuda(non_blocking=True)
+                val = val.index_select(seq_dim, index)
+                val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
+                batch[key] = val
+
+    return batch
