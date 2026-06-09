@@ -1,0 +1,29 @@
+# mixtral-8x7b-e8k2 — aligned with laer-moe-test/LAER-MoE meta_configs/mixtral-8x7b-e8k2.json
+
+model_size: mixtral-8x7b-e8k2
+hf_model_name_or_path: null
+
+hidden_size: 4096
+num_layers: 32
+num_attention_heads: 32
+num_query_groups: 8
+vocab_size: 32000
+
+normalization: RMSNorm
+norm_epsilon: 1.0e-5
+activation_func: torch.nn.functional.silu
+gated_linear_unit: true
+
+position_embedding_type: rope
+rotary_base: 1000000
+apply_rope_fusion: true
+
+add_bias_linear: false
+add_qkv_bias: false
+untie_embeddings_and_output_weights: false
+make_vocab_size_divisible_by: 128
+
+num_moe_experts: 8
+moe_ffn_hidden_size: 14336
+moe_router_topk: 2
+moe_router_load_balancing_type: none
