@@ -17,14 +17,22 @@ from galvatron.core.runtime.models.builder import build_sequential_from_arch
 from .initialize import init_empty_weights
 from .parallel import wrap_modules_relocation
 from .pipeline.grad_reduce import _finalize_params_bf16, _register_post_backward_hook_bf16
-from galvatron.core.runtime.utils.utils import get_layernorm_offset
-from galvatron.core.runtime.utils.utils import print_rank_0
+from galvatron.core.runtime.utils.utils import get_layernorm_offset, print_rank_0, rgetattr
 
 from galvatron.core.runtime.tensor_parallel.random import set_seed_with_group
 from galvatron.core.runtime.args_schema import GalvatronRuntimeArgs
 from galvatron.core.runtime.models.arch import ModelInfo, BlockNames
 from galvatron.core.runtime.pipeline import PipelineParallel
 from galvatron.core.runtime import parallel_state
+
+def _tie_embedding_lm_head(hp_model, args: GalvatronRuntimeArgs):
+    """Share lm_head weights with embed_tokens when untie_embeddings=False (Megatron-style)."""
+    if args.model.untie_embeddings_and_output_weights or hp_model.group_size != 1:
+        return
+    embed_weight = rgetattr(hp_model.model_cur_stage[0].module, "embed_tokens.weight")
+    lm_head = rgetattr(hp_model.model_cur_stage[-1].module, "lm_head")
+    lm_head.weight = embed_weight
+
 
 version_str = torch.__version__
 version_major, version_minor, _ = version_str.split(".")
@@ -271,6 +279,8 @@ def construct_hybrid_parallel_model_api(
         all_block_name=block_names.all_block_name,
         load_module_func=load_module_func,
     )
+
+    _tie_embedding_lm_head(hp_model, args)
 
     hp_model.gen_sp_layernorm_info(
         layer_module_types=module_types,
