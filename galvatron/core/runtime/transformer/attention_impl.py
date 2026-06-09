@@ -2,6 +2,7 @@
 
 
 import math
+import os
 from typing import Optional, Any, Tuple
 
 import torch
@@ -23,6 +24,12 @@ except ImportError:
         )
     except ImportError:
         flash_attn_unpadded_func = None
+
+
+def _galvatron_flash_deterministic() -> bool:
+    """True when accuracy_alignment scripts export GALVATRON_DETERMINISTIC=1 (default)."""
+    v = os.environ.get("GALVATRON_DETERMINISTIC", "").strip().lower()
+    return v in ("1", "true", "yes", "on")
 
 
 # --------- flash attention impl --------------
@@ -105,6 +112,7 @@ class FlashSelfOrCrossAttention(torch.nn.Module):
             dropout_p,
             softmax_scale=self.softmax_scale,
             causal=is_causal,
+            deterministic=_galvatron_flash_deterministic(),
         )
 
         output = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
@@ -607,6 +615,8 @@ def zigzag_ring_flash_attn_forward(
                     "window_size_right": window_size[1],
                 }
             )
+        if "deterministic" in params:
+            params["deterministic"] = deterministic
         outputs = _flash_attn_forward(**params)
         if len(outputs) == 8:
             block_out, _, _, _, _, block_lse, _, _ = outputs
@@ -814,7 +824,7 @@ class ZigZagRingFlashAttnFunc(torch.autograd.Function):
             causal=causal,
             window_size=window_size,
             alibi_slopes=alibi_slopes,
-            deterministic=False,
+            deterministic=deterministic,
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse)
@@ -903,6 +913,7 @@ class ZigzagRingFlashAttention(torch.nn.Module):
                 dropout_p=self.attention_dropout,
                 softmax_scale=softmax_scale,
                 causal=self.causal,
+                deterministic=_galvatron_flash_deterministic(),
                 group=self.cp_process_group,
                 ranks=self.cp_ranks,
             )

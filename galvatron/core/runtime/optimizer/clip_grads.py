@@ -42,14 +42,14 @@ try:
 
     l2_norm_impl = multi_tensor_l2norm
     multi_tensor_scale_impl = multi_tensor_scale
-except ImportError:
+except Exception:
     try:
         import amp_C
         from apex.multi_tensor_apply import multi_tensor_applier
 
         l2_norm_impl = amp_C.multi_tensor_l2norm
         multi_tensor_scale_impl = amp_C.multi_tensor_scale
-    except ImportError:
+    except Exception:
         import warnings
 
         warnings.warn(

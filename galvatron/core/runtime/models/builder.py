@@ -11,7 +11,7 @@ Key entry points:
     - ``get_runtime_profiler(args, path)``:  create a RuntimeProfiler
 """
 
-from typing import List
+from typing import List, Optional
 
 from galvatron.core.runtime.pipeline import PipeSequential
 
@@ -45,9 +45,9 @@ def build_sequential_from_arch(
     tp_groups: List,
     sp_groups: List,
     cp_groups: List,
-    ep_groups: List | None = None,
-    tp_of_ep_groups: List | None = None,
-    tp_and_ep_groups: List | None = None,
+    ep_groups: Optional[List] = None,
+    tp_of_ep_groups: Optional[List] = None,
+    tp_and_ep_groups: Optional[List] = None,
 ) -> PipeSequential:
     """Build a ``PipeSequential`` model directly from an architecture list.
 
@@ -114,7 +114,7 @@ def build_causal_lm_arch(args:GalvatronRuntimeArgs) -> List[str]:
     if args.model.model_type in ["gpt", "llama", "qwen"]:
         num_layers = args.model.num_layers
         return ["embedding"] + ["decoder"] * num_layers + ["prenorm", "lm_head"]
-    elif args.model.model_type in ["mistral"]:
+    elif args.model.model_type in ["mistral", "mixtral"]:
         num_layers = args.model.num_layers
         return ["embedding"] + ["moe_decoder"] * num_layers + ["prenorm", "lm_head"]
     else:
@@ -141,7 +141,7 @@ def get_block_names(args:GalvatronRuntimeArgs):
                 wrap_other_block_name=[GalvatronEmbedding, GalvatronFinalNorm, GalvatronCausalLMHead],
                 all_block_name=[GalvatronEmbedding, GalvatronDecoderLayer, GalvatronFinalNorm, GalvatronCausalLMHead],
             )
-    elif args.model.model_type in ["mistral"]:
+    elif args.model.model_type in ["mistral", "mixtral"]:
         if args.profile.profile_unit in ("attention", "mlp"):
             assert False, "Currently, MoE model does not support profile_unit in ('attention', 'mlp')"
         else:
@@ -168,7 +168,7 @@ def build_model(args:GalvatronRuntimeArgs):
     hybrid_parallel_config = get_hybrid_parallel_configs_api(args)
     model_info = ArchModelInfo(arch_list, args)
     block_names = get_block_names(args)
-    if args.model.model_type == "mistral":
+    if args.model.model_type in ("mistral", "mixtral"):
         load_module_func = load_moe_module
     elif args.model.model_size.startswith("gpt"):
         load_module_func = load_gpt_module
@@ -181,7 +181,8 @@ def build_model(args:GalvatronRuntimeArgs):
         hybrid_parallel_configs=hybrid_parallel_config,
         model_info=model_info,
         layernorm_name=["input_layernorm" ,"post_attention_layernorm", "norm"],
-        tied_wte_attr_names=["embed_tokens", "lm_head"] if args.model.untie_embeddings_and_output_weights else None,
+        # Match laer-moe-test MoEModel_hybrid_parallel: tying is done in-module, not via pipeline sync.
+        tied_wte_attr_names=None,
         block_names=block_names,
         load_module_func=load_module_func,
     )
