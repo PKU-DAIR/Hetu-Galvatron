@@ -47,7 +47,7 @@ def get_optimizer_and_param_scheduler(model, args):
     optimizer = Adam(
         model.parameters(),
         lr=train_args.lr,
-        weight_decay=train_args.weight_decay,
+        weight_decay=getattr(train_args, "adam_weight_decay", train_args.weight_decay),
         betas=(train_args.adam_beta1, train_args.adam_beta2),
         eps=train_args.adam_eps,
     )

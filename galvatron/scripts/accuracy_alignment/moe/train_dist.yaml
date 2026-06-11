@@ -1,7 +1,4 @@
-# MoE config — aligned with laer-moe-test/LAER-MoE convergence_analysis.csv run:
-#   LAER_convergence_mixtral-8x7b-e8k2_wikitext_batch64_seq1024_aux0_0.log
-#   galvatron/models/moe/scripts/train_convergence.sh
-# Usage: runtime.train.train_iters=70 for 70-iter convergence check
+# MoE accuracy-alignment config (mixtral-8x7b-e8k2)
 
 paths:
   data_path: /home/pkuhetu/xby/LAER-MoE-AE/datasets/processed/wikitext/mixtral_text_document
@@ -40,7 +37,7 @@ runtime:
     set_seqlen_manually: 1
     initialize_on_meta: 1
     shape_order: SBH
-    dropout_prob: 0.1
+    dropout_prob: 0.0
     print_loss: 0
     model_size: mixtral-8x7b-e8k2
     model_config_path: ${paths.model_config_path}
@@ -54,13 +51,14 @@ runtime:
     moe_router_topk: 2
     moe_aux_loss_coeff: 0
     moe_router_load_balancing_type: none
-    moe_token_dispatcher_type: allgather
+    moe_token_dispatcher_type: alltoall
     moe_permute_fusion: false
     moe_grouped_gemm: false
     make_vocab_size_divisible_by: 128
     rotary_base: 1000000
     apply_rope_fusion: true
-    untie_embeddings_and_output_weights: false
+    # laer HF Mixtral keeps embed/lm_head separate (no tied_wte); megatron also uses untie=true.
+    untie_embeddings_and_output_weights: true
 
   profile:
     profile: 1
@@ -72,19 +70,21 @@ runtime:
 
   train:
     seed: 1234
-    train_iters: 3000
+    train_iters: 70
     eval_iters: 1
     lr: 1.25e-6
     min_lr: 1.25e-7
     lr_decay_style: cosine
     lr_warmup_fraction: 0.1
     weight_decay: 0.1
+    adam_weight_decay: 0.01
     adam_beta1: 0.9
     adam_beta2: 0.95
     adam_eps: 1.0e-5
     init_method_std: 0.01
     sequence_parallel: true
     use_flash_attn: true
+    flash_decode: false
     global_batch_size: 64
     micro_batch_size: 1  # placeholder; overwritten by global_batch_size // dp_size (=1)
     chunks: 1

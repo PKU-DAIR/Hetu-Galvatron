@@ -178,7 +178,8 @@ class GalvatronAttention(nn.Module):
     def forward(self, hidden_states, position_ids, attention_mask, rotary_embedding):
         residual = hidden_states
         hidden_states = self.input_layernorm(hidden_states)
-        rotary_embedding = self._get_rotary_pos_emb(hidden_states) if self.use_rope and not rotary_embedding else rotary_embedding
+        if self.use_rope and rotary_embedding is None:
+            rotary_embedding = self._get_rotary_pos_emb(hidden_states)
         hidden_states, attn_bias = self.attention(hidden_states, attention_mask, rotary_pos_emb=rotary_embedding)
         if attn_bias is not None:
             hidden_states = hidden_states + attn_bias

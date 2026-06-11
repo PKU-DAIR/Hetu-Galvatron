@@ -19,6 +19,7 @@ from torch.utils.data import Dataset
 from galvatron.core.runtime.parallel_state import get_args
 from galvatron.core.runtime.hybrid_parallel_config import get_chunks
 from galvatron.core.runtime.pipeline.utils import chunk_batch
+from galvatron.core.runtime.transformer.rotary_pos_embedding import RotaryEmbedding
 from galvatron.core.runtime.datasets.megatron.utils import get_blend_from_list
 from galvatron.core.runtime import parallel_state
 from galvatron.core.runtime.datasets.megatron.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
@@ -63,7 +64,8 @@ def random_collate_fn(batch):
         attention_mask = attention_mask < 0.5
     else:
         attention_mask = None
-    return tokens, {"attention_mask": attention_mask, "labels": labels, "rotary_embedding": None}, None
+    rotary_embedding = _build_batch_rotary_embedding(args)
+    return tokens, {"attention_mask": attention_mask, "labels": labels, "rotary_embedding": rotary_embedding}, None
 
 
 # =========================================================================
@@ -506,6 +508,20 @@ def get_train_valid_test_data_iterators():
 # Batch construction
 # =========================================================================
 
+def _build_batch_rotary_embedding(args):
+    """Match laer-moe-test moe/dataloader.py: fixed-seq RoPE passed into every layer."""
+    m = args.model
+    t = args.train
+    head_dim = m.kv_channels or (m.hidden_size // m.num_attention_heads)
+    rotary_pos_emb = RotaryEmbedding(
+        head_dim,
+        m.rotary_percent or 1.0,
+        seq_len_interpolation_factor=getattr(m, "rotary_seq_len_interpolation_factor", None),
+        rotary_base=m.rotary_base or 10000,
+    )
+    return rotary_pos_emb(t.seq_length)
+
+
 def get_batch(data_iterator):
     """Fetch a micro-batch and build the loss function closure."""
     args = get_args()
@@ -533,6 +549,7 @@ def get_batch(data_iterator):
             "position_ids": batch.get("position_ids"),
             "attention_mask": batch.get("attention_mask"),
             "labels": batch.get("labels"),
+            "rotary_embedding": _build_batch_rotary_embedding(args),
         },
         partial(_loss_func, micro_lossmask),
     )

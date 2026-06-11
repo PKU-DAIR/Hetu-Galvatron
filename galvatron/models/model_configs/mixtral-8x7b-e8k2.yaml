@@ -20,10 +20,11 @@ apply_rope_fusion: true
 
 add_bias_linear: false
 add_qkv_bias: false
-untie_embeddings_and_output_weights: false
+untie_embeddings_and_output_weights: true
 make_vocab_size_divisible_by: 128
 
 num_moe_experts: 8
 moe_ffn_hidden_size: 14336
 moe_router_topk: 2
 moe_router_load_balancing_type: none
+moe_token_dispatcher_type: alltoall

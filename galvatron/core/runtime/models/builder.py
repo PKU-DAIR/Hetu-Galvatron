@@ -175,17 +175,23 @@ def build_model(args:GalvatronRuntimeArgs):
     else:
         load_module_func = load_llama_module
 
-    return construct_hybrid_parallel_model_api(
+    model = construct_hybrid_parallel_model_api(
         arch_list=arch_list,
         args=args,
         hybrid_parallel_configs=hybrid_parallel_config,
         model_info=model_info,
         layernorm_name=["input_layernorm" ,"post_attention_layernorm", "norm"],
-        # Match laer-moe-test MoEModel_hybrid_parallel: tying is done in-module, not via pipeline sync.
         tied_wte_attr_names=None,
         block_names=block_names,
         load_module_func=load_module_func,
     )
+    if args.model.is_moe_model:
+        import torch
+        from galvatron.core.runtime.moe.moe_utils import MoEAuxLossAutoScaler
+
+        loss_scale = torch.ones(1, device=torch.cuda.current_device())
+        MoEAuxLossAutoScaler.set_loss_scale(loss_scale / args.train.chunks)
+    return model
 
 
 def get_runtime_profiler(args, path, start_iter=10, end_iter=20):
