@@ -16,17 +16,7 @@
 
 Megatron 与 HF **各自** baseline vs test 对比，两边数据不必一致。
 
-## 确定性
-
-`record_loss.sh` 会自动 `source deterministic_env.sh`，默认开启 `GALVATRON_DETERMINISTIC=1` 等。关闭：
-
-```bash
-GALVATRON_DETERMINISTIC=0 bash scripts/accuracy_alignment/record_loss.sh ...
-```
-
-配置里请固定 `train.seed`（各 yaml 已设为 `42`）。
-
-`deterministic_env.sh` 默认 `GALVATRON_USE_TE=0`，不加载 Transformer Engine（避免 `libnvrtc` 等 CUDA 依赖）；RoPE/梯度裁剪走 FlashAttention、Apex 或 PyTorch 实现。若确需 TE：`GALVATRON_USE_TE=1 bash ...`。
+`record_loss.sh` 会按 `--variant` 进入对应训练目录：`llama` → `models/gpt/train_dist.py`，`moe` → `models/moe/train_dist.py`。
 
 ## 1) 一次性准备
 

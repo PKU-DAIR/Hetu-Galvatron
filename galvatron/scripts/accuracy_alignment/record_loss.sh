@@ -5,16 +5,9 @@ set -x
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GALVATRON_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 REPO_ROOT="$(cd "${GALVATRON_DIR}/.." && pwd)"
-GPT_DIR="${GALVATRON_DIR}/models/gpt"
 INVOKE_DIR="$(pwd)"
 
-cd "${GPT_DIR}"
 export PYTHONPATH="${REPO_ROOT}:${PYTHONPATH:-}"
-
-if [[ -f "${SCRIPT_DIR}/deterministic_env.sh" ]]; then
-  # shellcheck disable=SC1091
-  source "${SCRIPT_DIR}/deterministic_env.sh"
-fi
 
 export TORCH_NCCL_AVOID_RECORD_STREAMS="${TORCH_NCCL_AVOID_RECORD_STREAMS:-1}"
 export CUDA_DEVICE_MAX_CONNECTIONS="${CUDA_DEVICE_MAX_CONNECTIONS:-1}"
@@ -51,6 +44,13 @@ if [[ "${VARIANT}" != "llama" && "${VARIANT}" != "moe" ]]; then
   echo "[ERROR] VARIANT must be 'llama' or 'moe', got: ${VARIANT}"
   exit 1
 fi
+
+if [[ "${VARIANT}" == "moe" ]]; then
+  TRAIN_DIR="${GALVATRON_DIR}/models/moe"
+else
+  TRAIN_DIR="${GALVATRON_DIR}/models/gpt"
+fi
+cd "${TRAIN_DIR}"
 
 VARIANT_DIR="${SCRIPT_DIR}/${VARIANT}"
 if [[ -z "${ALIGN_CONFIG}" ]]; then
@@ -130,5 +130,6 @@ python "${SCRIPT_DIR}/upload_curves_to_wandb.py" \
 echo "Loss recording completed."
 echo "  variant: ${VARIANT}"
 echo "  mode: ${MODE}"
+echo "  train_dir: ${TRAIN_DIR}"
 echo "  config: ${ALIGN_CONFIG}"
 echo "  stored curve: ${CURVE_STORE}"

@@ -12,15 +12,6 @@ from datetime import timedelta
 from galvatron.utils import set_seed
 
 
-def _apply_galvatron_deterministic_from_env() -> None:
-    """When GALVATRON_DETERMINISTIC is truthy, tighten GPU determinism (accuracy_alignment scripts set this)."""
-    v = os.environ.get("GALVATRON_DETERMINISTIC", "").strip().lower()
-    if v not in ("1", "true", "yes", "on"):
-        return
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-
-
 @contextmanager
 def init_empty_weights(include_buffers: bool = True):
     """
@@ -158,7 +149,6 @@ def initialize_galvatron(args:GalvatronRuntimeArgs):
     set_global_variables(args)
     _initialize_distributed(args)
     set_seed(args.train.seed)
-    _apply_galvatron_deterministic_from_env()
     set_global_memory_buffer()
     initialize_rerun_state_machine()
 

@@ -53,7 +53,7 @@ runtime:
 
   train:
     seed: 42
-    train_iters: 200
+    train_iters: 70
     eval_iters: 1
     lr: 6.0e-4
     min_lr: 6.0e-5
