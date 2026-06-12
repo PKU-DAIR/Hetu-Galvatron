@@ -607,6 +607,8 @@ def zigzag_ring_flash_attn_forward(
                     "window_size_right": window_size[1],
                 }
             )
+        if "deterministic" in params:
+            params["deterministic"] = deterministic
         outputs = _flash_attn_forward(**params)
         if len(outputs) == 8:
             block_out, _, _, _, _, block_lse, _, _ = outputs
@@ -814,7 +816,7 @@ class ZigZagRingFlashAttnFunc(torch.autograd.Function):
             causal=causal,
             window_size=window_size,
             alibi_slopes=alibi_slopes,
-            deterministic=False,
+            deterministic=deterministic,
         )
         # this should be out_padded
         ctx.save_for_backward(q, k, v, out, softmax_lse)

@@ -1,0 +1,108 @@
+# MoE accuracy-alignment config (mixtral-8x7b-e8k2)
+
+paths:
+  data_path: /home/pkuhetu/xby/LAER-MoE-AE/datasets/processed/wikitext/mixtral_text_document
+  tokenizer_model: /home/pkuhetu/xby/laer-moe-test/tokenizers/mixtral
+  model_config_path: /home/pkuhetu/xby/galvatron-moe-test/galvatron/models/model_configs/mixtral-8x7b-e8k2.yaml
+  checkpoint_path: /home/pkuhetu/xby/laer-moe-test/checkpoints/laer_convergence/mixtral-8x7b-e8k2
+
+runtime:
+  parallel:
+    pp_deg: 1
+    global_tp_deg: 1
+    global_tp_consec: 1
+    global_cp_deg: 1
+    global_ep_deg: 8
+    global_tp_of_ep_deg: 1
+    global_checkpoint: 1
+    cp_mode: zigzag
+    sdp: 1
+    default_dp_type: zero2
+    pipeline_type: pipedream_flush
+    galvatron_config_path: null
+    vocab_sdp: 0
+    vocab_tp: 1
+    vocab_cp: 1
+    async_grad_reduce: false
+    mixed_precision: bf16
+    use_ulysses: false
+    reduce_in_fp32: false
+    entropy_in_fp32: false
+
+  model:
+    is_moe_model: true
+    set_experts_manually: 0
+    set_model_config_manually: 0
+    set_layernum_manually: 1
+    set_seqlen_manually: 1
+    initialize_on_meta: 1
+    shape_order: SBH
+    dropout_prob: 0.0
+    print_loss: 0
+    model_size: mixtral-8x7b-e8k2
+    model_config_path: ${paths.model_config_path}
+    num_layers: 4
+    hidden_size: 4096
+    num_attention_heads: 32
+    num_query_groups: 8
+    ffn_hidden_size: 14336
+    num_moe_experts: 8
+    moe_ffn_hidden_size: 14336
+    moe_router_topk: 2
+    moe_aux_loss_coeff: 0
+    moe_router_load_balancing_type: none
+    moe_token_dispatcher_type: alltoall
+    moe_permute_fusion: false
+    moe_grouped_gemm: false
+    make_vocab_size_divisible_by: 128
+    rotary_base: 1000000
+    apply_rope_fusion: true
+    # laer HF Mixtral keeps embed/lm_head separate (no tied_wte); megatron also uses untie=true.
+    untie_embeddings_and_output_weights: true
+
+  profile:
+    profile: 1
+    profile_mode: static
+    profile_unit: all
+    profile_forward: 0
+    save_profiled_memory: 0
+    exit_after_profiling: 0
+
+  train:
+    seed: 1234
+    train_iters: 70
+    eval_iters: 1
+    lr: 1.25e-6
+    min_lr: 1.25e-7
+    lr_decay_style: cosine
+    lr_warmup_fraction: 0.1
+    weight_decay: 0.1
+    adam_weight_decay: 0.01
+    adam_beta1: 0.9
+    adam_beta2: 0.95
+    adam_eps: 1.0e-5
+    init_method_std: 0.01
+    sequence_parallel: true
+    use_flash_attn: true
+    flash_decode: false
+    global_batch_size: 64
+    micro_batch_size: 1  # placeholder; overwritten by global_batch_size // dp_size (=1)
+    chunks: 1
+    seq_length: 1024
+    clip_grad: 0.0
+    data_sharding: true
+
+  data:
+    data_path: ${paths.data_path}
+    split: "949,50,1"
+    tokenizer_type: HuggingFaceTokenizer
+    tokenizer_model: ${paths.tokenizer_model}
+    shared_storage: true
+    create_attention_mask_in_dataloader: true
+
+  ckpt:
+    load: ${paths.checkpoint_path}
+    load_iteration: 0
+    distributed_checkpoint: false
+    save: null
+    save_interval: null
