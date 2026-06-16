@@ -257,7 +257,7 @@ def construct_hybrid_parallel_model_api(
         layer_sp_sizes=hp_configs_whole["sp_sizes_whole"],
         layer_cp_sizes=hp_configs_whole["cp_sizes_whole"],
         chunks=get_chunks(args),
-        process_group=pp_group.ranks,
+        process_group=pp_group,
         embedding_group=embedding_group,
         nproc_per_node=8,
         info=False,

@@ -181,7 +181,7 @@ def build_model(args:GalvatronRuntimeArgs):
         hybrid_parallel_configs=hybrid_parallel_config,
         model_info=model_info,
         layernorm_name=["input_layernorm" ,"post_attention_layernorm", "norm"],
-        tied_wte_attr_names=None,
+        tied_wte_attr_names=None if args.model.untie_embeddings_and_output_weights else ["embed_tokens", "lm_head"],
         block_names=block_names,
         load_module_func=load_module_func,
     )

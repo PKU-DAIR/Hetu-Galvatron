@@ -89,12 +89,11 @@ class PipelineParallel(nn.Module):
         )
         self.local_rank = self.global_rank % self.device_count
 
-        self.pp_global_ranks = (
-            [i for i in range(self.world_size)] if process_group is None else sorted(list(set(list(process_group))))
-        )
+        assert process_group is not None, "process_group is required for pipeline parallel"
+        self.pp_global_ranks = sorted(list(set(list(process_group.ranks))))
         assert self.global_rank in self.pp_global_ranks
         # TODO: fix the bug when construct the process group
-        self.group = torch.distributed.new_group(process_group)
+        self.group = process_group.group
         self.group_size = torch.distributed.get_world_size(self.group)
         self.group_rank = torch.distributed.get_rank(self.group)
         assert (

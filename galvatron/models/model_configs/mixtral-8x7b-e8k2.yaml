@@ -1,4 +1,4 @@
-# mixtral-8x7b-e8k2 — aligned with laer-moe-test/LAER-MoE meta_configs/mixtral-8x7b-e8k2.json
+# mixtral-8x7b-e8k2
 
 model_size: mixtral-8x7b-e8k2
 hf_model_name_or_path: null

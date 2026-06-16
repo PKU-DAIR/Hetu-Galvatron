@@ -509,7 +509,7 @@ def get_train_valid_test_data_iterators():
 # =========================================================================
 
 def _build_batch_rotary_embedding(args):
-    """Match laer-moe-test moe/dataloader.py: fixed-seq RoPE passed into every layer."""
+    """Fixed-seq RoPE passed into every layer."""
     m = args.model
     t = args.train
     head_dim = m.kv_channels or (m.hidden_size // m.num_attention_heads)

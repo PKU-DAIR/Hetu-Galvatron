@@ -231,10 +231,6 @@ class CommonTrainArgs(BaseModel):
     lr_wsd_decay_iters: Optional[int] = Field(default=None, description="Number of iterations to decay learning rate for WSD.")
     lr_wsd_decay_samples: Optional[int] = Field(default=None, description="Number of samples to decay learning rate for WSD.")
     weight_decay: float = Field(default=0.01, description="Weight decay coefficient for L2 regularization.")
-    adam_weight_decay: float = Field(
-        default=0.01,
-        description="Adam optimizer initial weight decay (laer-moe-test uses this; scheduler may override).",
-    )
     start_weight_decay: Optional[float] = Field(default=None, description="Initial weight decay coefficient for L2 regularization.")
     end_weight_decay: Optional[float] = Field(default=None, description="End of run weight decay coefficient for L2 regularization.")
     weight_decay_incr_style: Literal["constant", "linear", "cosine"] = Field(
@@ -260,7 +256,7 @@ class CommonTrainArgs(BaseModel):
     seq_length: Optional[int] = Field(default=None, description="Maximum sequence length to process.")
     clip_grad: float = Field(default=1.0, ge=0.0, description="Max gradient norm for clipping (0 disables).")
 
-    flash_decode: bool = Field(default=False, description="Use FlashDecode implementation of attention (training should keep False; laer/megatron default).")
+    flash_decode: bool = Field(default=False, description="Use FlashDecode implementation of attention (training should keep False).")
     test_mode: bool = Field(default=False, description="Whether to run real-time tests.")
 
 def _str_to_list(v):
