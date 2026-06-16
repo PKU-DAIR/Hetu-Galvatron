@@ -99,7 +99,7 @@ class ArchModelInfo(ModelInfo):
     def __init__(self, arch_list: List[str], args:GalvatronRuntimeArgs):
         super().__init__()
         m = args.model
-        if m.model_type in ["gpt", "llama", "qwen", "mistral"]:
+        if m.model_type in ["gpt", "llama", "qwen", "mistral", "mixtral"]:
             num_layers = m.num_layers
             seq_len = args.train.seq_length
             hidden_size = m.hidden_size

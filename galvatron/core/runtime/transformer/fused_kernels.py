@@ -249,8 +249,7 @@ try:
         else:
             return FusedRoPEFunc.apply(t, freqs, "thd", cu_seqlens)
 
-except ImportError:
-
+except Exception:
     pass
 
 # Fused Vocab Parallel Cross Entropy

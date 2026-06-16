@@ -67,25 +67,26 @@ def fsdp_reduce_gradients(model):
 
 @torch.no_grad()
 def _allreduce_word_embedding_no_pipeline(wte_model, wte_attr_name, lmhead_model, lmhead_attr_name):
-    wte = rgetattr(wte_model.module, wte_attr_name)
-    lmhead = rgetattr(lmhead_model.module, lmhead_attr_name)
+    wte = wte_model.module
+    lmhead = lmhead_model.module
     if hasattr(wte, "_handles"):
         for wte_handle, lmhead_handle in zip(wte._handles, lmhead._handles):
             assert wte_handle.flat_param.data is not None
             assert lmhead_handle.flat_param.data is not None
-            wte_handle.flat_param.data.copy_((wte_handle.flat_param.data + lmhead_handle.flat_param.data) / 2)
-            lmhead_handle.flat_param.data.copy_((wte_handle.flat_param.data + lmhead_handle.flat_param.data) / 2)
+            avg = (wte_handle.flat_param.data + lmhead_handle.flat_param.data) / 2
+            wte_handle.flat_param.data.copy_(avg)
+            lmhead_handle.flat_param.data.copy_(avg)
     else:
         assert wte._handle.flat_param.data is not None
         assert lmhead._handle.flat_param.data is not None
-        wte._handle.flat_param.data.copy_((wte._handle.flat_param.data + lmhead._handle.flat_param.data) / 2)
-        lmhead._handle.flat_param.data.copy_((wte._handle.flat_param.data + lmhead._handle.flat_param.data) / 2)
+        avg = (wte._handle.flat_param.data + lmhead._handle.flat_param.data) / 2
+        wte._handle.flat_param.data.copy_(avg)
+        lmhead._handle.flat_param.data.copy_(avg)
 
 
-# For Finalization of Model Parameters
 @torch.no_grad()
 def _allreduce_word_embedding(module, tied_wte_attr_name, group):
-    word_embedding = rgetattr(module.module, tied_wte_attr_name)
+    word_embedding = module.module
     if hasattr(word_embedding, "_handles"):
         for handle in word_embedding._handles:
             assert handle.flat_param.data is not None
@@ -95,27 +96,30 @@ def _allreduce_word_embedding(module, tied_wte_attr_name, group):
         dist.all_reduce(word_embedding._handle.flat_param.data, op=dist.ReduceOp.AVG, group=group)
 
 
+# For Finalization of Model Parameters, unsupport for learned position embedding weights
 @torch.no_grad()
 def _allreduce_word_embedding_grads_no_pipeline(wte_model, wte_attr_name, lmhead_model, lmhead_attr_name):
-    wte = rgetattr(wte_model.module, wte_attr_name)
-    lmhead = rgetattr(lmhead_model.module, lmhead_attr_name)
+    wte = wte_model.module
+    lmhead = lmhead_model.module
     if hasattr(wte, "_handles"):
         for wte_handle, lmhead_handle in zip(wte._handles, lmhead._handles):
             assert wte_handle.flat_param.grad is not None
             assert lmhead_handle.flat_param.grad is not None
-            wte_handle.flat_param.grad.copy_((wte_handle.flat_param.grad + lmhead_handle.flat_param.grad) / 2)
-            lmhead_handle.flat_param.grad.copy_((wte_handle.flat_param.grad + lmhead_handle.flat_param.grad) / 2)
+            avg = (wte_handle.flat_param.grad + lmhead_handle.flat_param.grad) / 2
+            wte_handle.flat_param.grad.copy_(avg)
+            lmhead_handle.flat_param.grad.copy_(avg)
     else:
         assert wte._handle.flat_param.grad is not None
         assert lmhead._handle.flat_param.grad is not None
-        wte._handle.flat_param.grad.copy_((wte._handle.flat_param.grad + lmhead._handle.flat_param.grad) / 2)
-        lmhead._handle.flat_param.grad.copy_((wte._handle.flat_param.grad + lmhead._handle.flat_param.grad) / 2)
+        avg = (wte._handle.flat_param.grad + lmhead._handle.flat_param.grad) / 2
+        wte._handle.flat_param.grad.copy_(avg)
+        lmhead._handle.flat_param.grad.copy_(avg)
 
 
 # For Finalization of Model Gradients
 @torch.no_grad()
 def _allreduce_word_embedding_grads(module, tied_wte_attr_name, group):
-    word_embedding = rgetattr(module.module, tied_wte_attr_name)
+    word_embedding = module.module
     if hasattr(word_embedding, "_handles"):
         for handle in word_embedding._handles:
             assert handle.flat_param.grad is not None

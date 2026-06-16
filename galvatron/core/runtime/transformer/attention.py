@@ -47,7 +47,7 @@ try:
 
     HAVE_TE = True
     from megatron.core.extensions.transformer_engine import SplitAlongDim
-except ImportError:
+except Exception:
     HAVE_TE = False
     SplitAlongDim = None
 

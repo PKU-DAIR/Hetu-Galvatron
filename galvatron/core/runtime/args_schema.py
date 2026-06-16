@@ -140,7 +140,7 @@ class GalvatronModelArgs(BaseModel):
     moe_aux_loss_coeff: float = Field(default=0.0, description="Scaling coefficient for the aux loss (e.g. 1e-2 is a good start).")
     moe_z_loss_coeff: Optional[float] = Field(default=None, description="Scaling coefficient for the z-loss (e.g. 1e-3 is a good start).")
     # --- Token dispatch ---
-    moe_token_dispatcher_type: Literal["allgather", "alltoall_seq", "alltoall", "flex"] = Field(default="allgather", description="MoE token dispatcher type.")
+    moe_token_dispatcher_type: Literal["allgather", "alltoall_seq", "alltoall", "flex"] = Field(default="alltoall", description="MoE token dispatcher type.")
     moe_expert_capacity_factor: Optional[float] = Field(default=None, description="Capacity factor for each expert. None means no token dropping.")
     moe_pad_expert_input_to_capacity: bool = Field(default=False, description="Pad input for each expert to match expert capacity length.")
     moe_token_drop_policy: Literal["probs", "position"] = Field(default="probs", description="Token drop policy when capacity is exceeded: 'probs' drops lowest-prob tokens, 'position' drops trailing tokens.")
@@ -256,7 +256,7 @@ class CommonTrainArgs(BaseModel):
     seq_length: Optional[int] = Field(default=None, description="Maximum sequence length to process.")
     clip_grad: float = Field(default=1.0, ge=0.0, description="Max gradient norm for clipping (0 disables).")
 
-    flash_decode: bool = Field(default=True, description="Use FlashDecode implementation of attention.")
+    flash_decode: bool = Field(default=False, description="Use FlashDecode implementation of attention (training should keep False).")
     test_mode: bool = Field(default=False, description="Whether to run real-time tests.")
 
 def _str_to_list(v):
