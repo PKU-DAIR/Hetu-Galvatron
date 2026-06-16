@@ -1,6 +1,6 @@
 import collections
 from functools import partial
-from typing import List, Set, Tuple
+from typing import List, Set, Tuple, Dict
 
 import torch
 import torch.distributed
@@ -14,6 +14,12 @@ from torch.distributed.fsdp.wrap import _recursive_wrap, lambda_auto_wrap_policy
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from .redistribute import fused_split_allgather, split_to_group, gather_from_group
+from torch.distributed.fsdp._fully_shard._fully_shard import fully_shard, FSDPModule
+from torch.distributed.fsdp._fully_shard._fsdp_api import MixedPrecisionPolicy
+from torch.distributed.device_mesh import DeviceMesh
+from .comm_groups import CommGroup
+from galvatron.core.runtime.checkpoint.types import LoadModuleFunc
+from galvatron.core.runtime.parallel_state import fsdp2_enabled
 
 
 def _get_modules_to_materialize(root_module: nn.Module) -> List[nn.Module]:
@@ -328,6 +334,25 @@ def wrap_modules_data_parallel(
     from galvatron.core.runtime.parallel_state import get_args
 
     args = get_args()
+    if fsdp2_enabled():
+        return wrap_data_parallel_fsdp2(
+            module_list=module_list,
+            dp_types=dp_types,
+            dp_groups=dp_groups,
+            module_types=module_types,
+            dp_of_ep_groups=dp_of_ep_groups,
+            pp_devices=pp_devices,
+            mixed_precision=mixed_precision,
+            default_process_group=default_process_group,
+            wrap_block_name=wrap_block_name,
+            wrap_other_block_name=wrap_other_block_name,
+            tp_groups=tp_groups,
+            tp_of_ep_groups=tp_of_ep_groups,
+            ep_groups=ep_groups,
+            all_block_name=all_block_name,
+            load_module_func=load_module_func,
+        )
+
     pp_on = True if args.parallel.pp_deg > 1 else False
     # pp_on = True if process_group.size < torch.distributed.get_world_size() else False
 
@@ -408,3 +433,363 @@ def wrap_modules_relocation(module_list, allgather_cp_groups, allgather_tp_sp_cp
             fused_allgather_groups[i], fused_split_groups[i]
         )
     return module_list
+
+
+# ============================================== FSDP2 ============================================== 
+
+_MESH_CACHE: Dict[object, DeviceMesh] = {}
+
+
+def _mesh_from_group(
+    group: torch.distributed.ProcessGroup,
+    fsdp_type: str = "zero3",
+    device_type: str = "cuda",
+) -> DeviceMesh:
+    """Build the DeviceMesh for a fully_shard call.
+
+    - 'ddp': a 2D HSDP mesh ``(replicate=group.size(), shard=1)``. With the shard
+      dim set to 1 each rank keeps the full parameter (no sharding) and gradients
+      are only all-reduced over the replicate dim -- i.e. it degenerates to DDP.
+    - 'zero2' / 'zero3': a 1D mesh that shards parameters over the whole group.
+    """
+    is_ddp = fsdp_type == "ddp"
+    key = (group, is_ddp)
+    mesh = _MESH_CACHE.get(key)
+    if mesh is None:
+        if is_ddp:
+            # Build the HSDP mesh (replicate=group, shard=1) from existing groups so no
+            # world-collective new_group is issued: the replicate dim reuses `group`, and
+            # the shard dim is a per-rank singleton created with local synchronization.
+            rank = torch.distributed.get_rank()
+            dp_ranks = torch.distributed.get_process_group_ranks(group)
+            shard_cache = _mesh_from_group.__dict__.setdefault("_shard_group_cache", {})
+            shard_group = shard_cache.get(rank)
+            if shard_group is None:
+                shard_group = torch.distributed.new_group([rank], use_local_synchronization=True)
+                shard_cache[rank] = shard_group
+            mesh = DeviceMesh.from_group(
+                [group, shard_group],
+                device_type,
+                mesh=torch.tensor(dp_ranks, dtype=torch.int).reshape(len(dp_ranks), 1),
+                mesh_dim_names=("replicate", "shard"),
+            )
+        else:
+            mesh = DeviceMesh.from_group(group, device_type)
+        _MESH_CACHE[key] = mesh
+    return mesh
+
+
+def _mixed_precision_policy(mixed_precision: torch.dtype, reduce_in_fp32: bool) -> MixedPrecisionPolicy:
+    reduce_dtype = torch.float if reduce_in_fp32 else mixed_precision
+    return MixedPrecisionPolicy(
+        param_dtype=mixed_precision,
+        reduce_dtype=reduce_dtype,
+        output_dtype=mixed_precision,
+        cast_forward_inputs=False,
+    )
+
+
+def _get_matched_modules(module, target_block_classes) -> List[nn.Module]:
+    modules_to_wrap = []
+    for name, submodule in module.named_modules():
+        if any(isinstance(submodule, block) for block in target_block_classes):
+            modules_to_wrap.append(submodule)
+    return modules_to_wrap
+
+
+def wrap_data_parallel_fsdp2(
+    module_list,
+    dp_types: List[int],
+    dp_groups: List[CommGroup],
+    module_types: List[str],
+    dp_of_ep_groups:List[CommGroup]=None,
+    pp_devices=None,
+    mixed_precision=torch.bfloat16,
+    default_process_group=None,
+    wrap_block_name=None,
+    wrap_other_block_name=None,
+    tp_groups=None,
+    tp_of_ep_groups=None,
+    ep_groups=None,
+    all_block_name=None,
+    load_module_func:LoadModuleFunc=None,
+):
+    assert len(module_list) == len(dp_types)
+    assert len(module_list) == len(dp_groups)
+    assert len(module_list) == len(module_types)
+
+    from galvatron.core.runtime.parallel_state import get_args
+    args = get_args()
+
+    # [Step 0] apply patch for fsdp2
+    apply_fsdp2_patch()
+
+    # [Step 1] fully_shard every module in module_list
+    for idx, module in enumerate(module_list):
+        # 1.1 determine FSDP type and corresponding args
+        fsdp_type = args.parallel.default_dp_type if dp_types[idx] == 0 else 'zero3'
+        assert fsdp_type in ("ddp", "zero2", "zero3"), f"unsupported dp_type {fsdp_type} for fsdp2"
+
+        reshard_after_forward = True if fsdp_type == 'zero3' else False
+        reshard_after_backward = True if fsdp_type == 'zero3' else False
+
+        fsdp_args = {
+            'mesh': _mesh_from_group(dp_groups[idx].group, fsdp_type),
+            'mp_policy': _mixed_precision_policy(mixed_precision, args.parallel.reduce_in_fp32),
+            'reshard_after_forward': reshard_after_forward,
+        }
+        moe_fsdp_args = None if not args.model.is_moe_model else {
+            'mesh': _mesh_from_group(dp_of_ep_groups[idx].group, fsdp_type),
+            'mp_policy': _mixed_precision_policy(mixed_precision, args.parallel.reduce_in_fp32),
+            'reshard_after_forward': reshard_after_forward,
+        }
+
+        # 1.2 find submodules to wrap based on module_type and wrap_block_name
+        target_block_classes = wrap_block_name if ("enc" in module_types[idx] or "dec" in module_types[idx]) else wrap_other_block_name
+        modules_to_wrap = _get_matched_modules(module, target_block_classes)
+
+        # 1.3 apply fully_shard, for MoE model, wrap MoE layer with dp_of_ep_groups and then wrap the whole block with dp_groups
+        if args.model.is_moe_model and ("enc" in module_types[idx] or "dec" in module_types[idx]):
+            assert len(modules_to_wrap) == 2, f"expected exactly 2 submodules to wrap for MoE model, but got {len(modules_to_wrap)} in module_list[{idx}]"
+            fully_shard(modules_to_wrap[1], **moe_fsdp_args)
+            fully_shard(modules_to_wrap[0], **fsdp_args)
+            setattr(modules_to_wrap[1], "scaling_groups", (dp_groups[idx].group, dp_of_ep_groups[idx].group))
+        else:
+            assert len(modules_to_wrap) == 1, f"expected exactly 1 submodule to wrap, but got {len(modules_to_wrap)} in module_list[{idx}]"
+            fully_shard(modules_to_wrap[0], **fsdp_args)
+
+        # 1.4 set reshard_after_backward
+        for module in modules_to_wrap:
+            module.set_reshard_after_backward(reshard_after_backward, recurse=False)
+
+    # [Step 2] fully_shard the root module_list
+    root_fsdp_args = {
+        'mesh': _mesh_from_group(dp_groups[0].group, args.parallel.default_dp_type), # use the vocab group as the root group
+        'mp_policy': _mixed_precision_policy(mixed_precision, args.parallel.reduce_in_fp32),
+        'reshard_after_forward': False, # For the root module, it's recommended to set False according to the fully_shard docstring.
+    }
+    module_list = fully_shard(module_list, **root_fsdp_args)
+    module_list: FSDPModule
+    module_list.set_reshard_after_backward(False, recurse=False) # Keep root params resident after backward, same reason as reshard_after_forward=False above.
+
+    # [Step 3] materialize parameters and move to target device
+    module_list = module_list.to_empty(device='cuda')
+    if args.ckpt.load is None:
+        module: nn.Module
+        for module in module_list.modules():
+            if callable(getattr(module, "reset_parameters", None)):
+                module.reset_parameters()
+    else:
+        for idx in range(len(module_list)):
+            target_block_classes = wrap_block_name if ("enc" in module_types[idx] or "dec" in module_types[idx]) else wrap_other_block_name
+            modules_to_materialize = _get_matched_modules(module_list[idx], target_block_classes)
+            for idx, module in enumerate(modules_to_materialize):
+                if idx == 1 and args.model.is_moe_model and ("enc" in module_types[idx] or "dec" in module_types[idx]):
+                    tp_group = tp_of_ep_groups[idx].group
+                else:
+                    tp_group = tp_groups[idx].group
+                for name, param in module.named_parameters():
+                    module_path, _ , param_name = name.rpartition(".")
+                    submodule = module.get_submodule(module_path)
+                    load_module_func(
+                        load=args.ckpt.load,
+                        tp_groups=tp_group,
+                        name=module_path,
+                        submodule=submodule,
+                        module=module,
+                        distributed_checkpoint=args.ckpt.distributed_checkpoint,
+                        ep_groups=ep_groups[idx].group if ep_groups is not None else None,
+                    )
+
+    # [Step 4] explicit forward prefetch and backward prefetch
+    all_fsdp2_module_list:List[FSDPModule] = []
+    for idx in range(len(module_list)):
+        for module in module_list[idx].modules():
+            if isinstance(module, FSDPModule):
+                all_fsdp2_module_list.append(module)
+
+    num_to_forward_prefetch = 1
+    for idx, module in enumerate(all_fsdp2_module_list):
+        module:FSDPModule
+        if idx >= len(all_fsdp2_module_list) - num_to_forward_prefetch:
+            break
+
+        modules_to_prefetch = [
+            all_fsdp2_module_list[idx + j] for j in range(1, num_to_forward_prefetch + 1)
+        ]
+        module.set_modules_to_forward_prefetch(modules_to_prefetch)
+
+    num_to_backward_prefetch = 1
+    for idx, module in enumerate(all_fsdp2_module_list):
+        module:FSDPModule
+        if idx < num_to_backward_prefetch:
+            state = module._get_fsdp_state()
+            # These modules run last in backward, so nothing is left to prefetch.
+            # `[None]` is non-empty (disables FSDP2's default PP-unsafe prefetch)
+            # but skipped by the patched `_pre_backward`, so no prefetch is issued.
+            state._states_to_backward_prefetch = [None]
+        else:
+            modules_to_prefetch = [
+                all_fsdp2_module_list[idx - j] for j in range(1, num_to_backward_prefetch + 1)
+            ]
+            module.set_modules_to_backward_prefetch(modules_to_prefetch)
+
+
+    return module_list
+
+
+# ============================== fsdp2 patches ==============================
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState, compiled_autograd_enabled, DDPMeshInfo, FSDPMeshInfo
+from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup, ReduceScatterState, AllReduceState
+from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
+from torch.distributed.fsdp._fully_shard._fsdp_collectives import foreach_reduce
+
+from typing import Any
+import logging
+from torch.profiler import record_function
+
+
+def _pre_backward_patch(self, grad: torch.Tensor) -> torch.Tensor:
+    self._training_state = TrainingState.PRE_BACKWARD
+    self._register_root_post_backward_final_callback()
+    if self._fsdp_param_group:
+        default_prefetch = len(self._states_to_backward_prefetch) == 0
+        self._fsdp_param_group.pre_backward(default_prefetch)
+    for fsdp_state in self._states_to_backward_prefetch:
+        if fsdp_state is None: # modified by galvatron
+            continue
+        if (target_param_group := fsdp_state._fsdp_param_group) is not None:
+            FSDPParamGroup._prefetch_unshard(target_param_group, "backward")
+    return grad
+
+
+def post_backward_patch(self:FSDPParamGroup, *unused: Any):
+    logger = logging.getLogger("torch.distributed.fsdp.fully_shard") # modified by galvatron
+
+    # This method should be idempotent and safe to call even when this
+    # FSDP parameter group was not used in backward (should be a no-op)
+    if not compiled_autograd_enabled():
+        logger.debug("%s", self._with_fqn("FSDP::post_backward"))
+    self._training_state = TrainingState.POST_BACKWARD
+    with record_function(self._with_fqn("FSDP::post_backward_accumulate")):
+        for fsdp_param in self.fsdp_params:
+            fsdp_param.accumulate_unsharded_grad_if_needed()
+    with record_function(self._with_fqn("FSDP::post_backward_reshard")):
+        if not self.reduce_grads:
+            if self.reshard_after_backward or ( # modified by galvatron
+                self.reshard_after_backward == False and hasattr(self, 'last_batch') and getattr(self, 'last_batch') == True
+            ):
+                self.reshard()
+            for fsdp_param in self.fsdp_params:
+                fsdp_param.to_accumulated_grad_if_needed()
+            return
+        # Save the autograd-computed gradients before resharding to only
+        # access the unsharded parameters when their data is present
+        fsdp_params_with_grad: list[FSDPParam] = []
+        unsharded_grads: list[torch.Tensor] = []
+        for fsdp_param in self.fsdp_params:
+            if not hasattr(fsdp_param, "_unsharded_param"):
+                continue
+            # May have an accumulated gradient of the reduce dtype if the
+            # previous backward did not reduce-scatter
+            if fsdp_param.unsharded_accumulated_grad is not None:
+                fsdp_params_with_grad.append(fsdp_param)
+                unsharded_grads.append(fsdp_param.unsharded_accumulated_grad_data)
+                fsdp_param.unsharded_accumulated_grad = None
+            elif fsdp_param.unsharded_param.grad is not None:
+                fsdp_params_with_grad.append(fsdp_param)
+                unsharded_grads.append(fsdp_param.unsharded_grad_data)
+                fsdp_param.unsharded_param.grad = None
+        if self.reshard_after_backward or ( # modified by galvatron
+                self.reshard_after_backward == False and hasattr(self, 'last_batch') and getattr(self, 'last_batch') == True
+            ):
+            self.reshard()
+    if len(fsdp_params_with_grad) == 0:
+        return
+    with record_function(self._with_fqn("FSDP::post_backward_reduce")):
+        if (
+            self.comm_ctx.reduce_scatter_state is not None
+            and self.comm_ctx.reduce_scatter_state.event is not None
+        ):
+            self.device_handle.current_stream().wait_event(
+                self.comm_ctx.reduce_scatter_state.event
+            )
+        self.comm_ctx.reduce_scatter_state = None
+        all_reduce_pg = (
+            self._all_reduce_process_group
+            if isinstance(self.mesh_info, DDPMeshInfo)
+            else None
+        )
+        all_reduce_stream: torch.cuda.Stream
+        if all_reduce_pg is None and self._all_reduce_hook_stream is not None:
+            # this means the native HSDP is not enabled,
+            # but user may want to have a custom HSDP setup
+            if self._all_reduce_hook is None:
+                raise AssertionError(
+                    "all reduce hook stream is specified but hook itself is missing."
+                )
+            all_reduce_stream = self._all_reduce_hook_stream
+        else:
+            all_reduce_stream = self.comm_ctx.all_reduce_stream
+
+        self._wait_for_post_backward()
+        (
+            reduce_scatter_input,
+            reduce_scatter_event,
+            self._post_reduce_event,
+            all_reduce_input,
+            all_reduce_event,
+            self._partial_reduce_output,
+        ) = foreach_reduce(
+            fsdp_params_with_grad,
+            unsharded_grads,
+            (
+                self._reduce_scatter_process_group
+                if isinstance(self.mesh_info, FSDPMeshInfo)
+                else None  # pyre-fixme[6]
+            ),
+            self.comm_ctx.reduce_scatter_stream,
+            self._reduce_scatter_comm,
+            self._orig_dtype,
+            self._reduce_dtype,
+            self.device,
+            self.gradient_divide_factor,
+            (
+                self._all_reduce_process_group
+                if isinstance(self.mesh_info, DDPMeshInfo)
+                else None
+            ),
+            all_reduce_stream,
+            self.all_reduce_grads,
+            self._partial_reduce_output,
+            self._all_reduce_hook,
+            self.force_sum_reduction_for_comms,
+        )
+        self.comm_ctx.reduce_scatter_state = ReduceScatterState(
+            reduce_scatter_input, reduce_scatter_event
+        )
+        if all_reduce_input is not None:
+            if self.device.type != "cpu":
+                if all_reduce_event is None:
+                    raise AssertionError(
+                        "Expected all_reduce_event to be set for non-CPU device"
+                    )
+            self._all_reduce_state = AllReduceState(
+                all_reduce_input, all_reduce_event
+                )
+
+
+
+def apply_fsdp2_patch():
+    from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
+    from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
+    patches = []
+
+    FSDPState._pre_backward = _pre_backward_patch
+    patches.append("FSDPState._pre_backward -> _pre_backward_patch")
+
+    FSDPParamGroup.post_backward = post_backward_patch
+    patches.append("FSDPParamGroup.post_backward -> post_backward_patch")
+
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        print("[Galvatron] Applied FSDP2 patches:\n  - " + "\n  - ".join(patches))

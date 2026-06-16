@@ -7,9 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 from torch import Tensor
+from torch.distributed.fsdp._fully_shard._fully_shard import FSDPModule
 
 from galvatron.core.runtime.parallel import wrap_modules_checkpoint, wrap_modules_data_parallel
-from galvatron.core.runtime.parallel_state import get_args
+from galvatron.core.runtime.parallel_state import get_args, fsdp2_enabled
 
 version_str = torch.__version__
 version_major, version_minor, _ = version_str.split(".")
@@ -24,6 +25,7 @@ from .grad_reduce import (
     _allreduce_word_embedding_no_pipeline,
     _send_backward_hook,
 )
+from .sp_grad_reduce import fsdp2_reduce_megatron_sp_norm_gradients
 from .utils import *
 
 Shape = Union[List[int], torch.Size]
@@ -141,6 +143,7 @@ class PipelineParallel(nn.Module):
         self.sequence_parallel = True # args.sequence_parallel
         self.shape_order = args.model.shape_order
         self.async_grad_reduce = args.parallel.async_grad_reduce
+        self.use_fsdp2 = fsdp2_enabled()
         # if not self.async_grad_reduce and self.group_size > 1:
         #     assert Fasle, "No async grad reduce only support pp = 1"
         # assert async_grad_reduce # Remove support for async_grad_reduce=False, which is the old version for gradient synchronization
@@ -271,6 +274,10 @@ class PipelineParallel(nn.Module):
             for m in block.modules():
                 if isinstance(m, FSDP):
                     m.last_batch = state
+                elif isinstance(m, FSDPModule): # fsdp2
+                    fsdp2_state = m._get_fsdp_state()
+                    if fsdp_param_group := fsdp2_state._fsdp_param_group:
+                        fsdp_param_group.last_batch = state
 
     def update_tensor_shape(self, microbatches, dp_size_input, dp_size, tp_size, sp_size, template_tensor_shape, cp_size=None):
         # Update tensor_shape with correct microbatch_size
@@ -302,6 +309,39 @@ class PipelineParallel(nn.Module):
                         tensor_shape_last[i][2],
                     ]
         return tensor_shape, tensor_shape_last
+
+    def reset_exec_order(self):
+        """Reset FSDP's per-iteration execution-order tracking (used for prefetch).
+
+        FSDP records the order in which params are gathered each iteration to drive
+        prefetching. This bookkeeping is normally cleared in the post-backward
+        callback, so a forward-only pass (no backward) never clears it and the order
+        list grows every iteration -> unbounded memory growth. Call this after each
+        forward-only iteration to clear it manually.
+        """
+        model = self.model_cur_stage
+        if self.use_fsdp2:
+            # FSDP2: no single _ExecOrderData object; the tracking is split into
+            #   - comm_ctx.post_forward_order  (shared, root level)
+            #   - param_group._post_forward_indices  (per param group)
+            # Normally cleared in FSDPState._root_post_backward_final_callback
+            # (post_forward_order, torch .../_fully_shard/_fsdp_state.py) and in
+            # FSDPParamGroup.finalize_backward (_post_forward_indices,
+            # torch .../_fully_shard/_fsdp_param_group.py). Here we clear both manually.
+            for m in model.modules():
+                if isinstance(m, FSDPModule):
+                    state = m._get_fsdp_state()
+                    if state._is_root:
+                        state._comm_ctx.post_forward_order.clear()
+                    if state._fsdp_param_group is not None:
+                        state._fsdp_param_group._post_forward_indices.clear()
+        else:
+            # FSDP1: _ExecOrderData.next_iter() advances the iteration and clears the
+            # post-forward order. Normally called inside _post_backward_final_callback
+            # (torch/distributed/fsdp/_runtime_utils.py); call it manually here.
+            for m in model.modules():
+                if isinstance(m, FSDP) and m._is_root:
+                    m._exec_order_data.next_iter()
 
     def no_pipeline_forward_backward(
         self,
@@ -368,14 +408,15 @@ class PipelineParallel(nn.Module):
             )
 
         if forward_only:
-            for m in model.modules():
-                if isinstance(m, FSDP) and m._is_root:
-                    m._exec_order_data.next_iter()
+            self.reset_exec_order()
             return losses_reduced
 
         if num_microbatches > 1 and self.async_grad_reduce:
             exit_no_sync_context(model)
             fsdp_reduce_gradients(model)
+
+        if self.use_fsdp2 and self.sequence_parallel:
+            fsdp2_reduce_megatron_sp_norm_gradients(model, tp_groups=self.layer_tp_groups)
 
         if self.finalize_wte_grads:
             torch.distributed.barrier()
@@ -705,6 +746,9 @@ class PipelineParallel(nn.Module):
             exit_no_sync_context(model)
             fsdp_reduce_gradients(model)
 
+        if self.use_fsdp2 and self.sequence_parallel:
+            fsdp2_reduce_megatron_sp_norm_gradients(model, tp_groups=self.layer_tp_groups)
+
         if self.finalize_wte_grads and not forward_only:
             torch.distributed.barrier()
             self.finalize_wte_grads_func()
@@ -888,6 +932,9 @@ class PipelineParallel(nn.Module):
             model = self.model_cur_stage
             exit_no_sync_context(model)
             fsdp_reduce_gradients(model)
+        
+        if self.use_fsdp2 and self.sequence_parallel:
+            fsdp2_reduce_megatron_sp_norm_gradients(model, tp_groups=self.layer_tp_groups)
 
         if self.finalize_wte_grads:
             torch.distributed.barrier()

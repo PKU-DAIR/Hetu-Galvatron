@@ -39,6 +39,8 @@ from torch.distributed.fsdp._runtime_utils import (
     _reduce_grad_no_shard,
 )
 from torch.distributed.utils import _apply_to_tensors, _cast_forward_inputs, _p_assert, _to_kwargs
+from torch.distributed.tensor import DTensor
+from galvatron.core.runtime.comm_groups import CommGroup
 
 log = logging.getLogger(__name__)
 
@@ -130,3 +132,18 @@ def _post_backward_hook_sp(
             # stream and consumed in the post-backward stream, inform the
             # caching allocator (before it goes out of scope)
             _no_dispatch_record_stream(autograd_computed_grad, state._post_backward_stream)
+
+
+@torch.no_grad()
+def fsdp2_reduce_megatron_sp_norm_gradients(module_list, tp_groups: List[CommGroup]) -> None:
+    for idx, module in enumerate(module_list):
+        tp_group = tp_groups[idx]
+        if tp_group is None or len(tp_group.ranks) == 1: # megatron-sp is None or world_size is 1, no need to reduce
+            continue
+        for name, param in module.named_parameters():
+            if 'norm' in name.lower() and 'q_layernorm' not in name.lower() and 'k_layernorm' not in name.lower(): # norm param, reduce its grad
+                grad:DTensor
+                grad = param.grad
+                assert grad is not None, f"Expect the norm parameter {name} to have gradient"
+                local_grad = grad.to_local()
+                dist.all_reduce(local_grad, group=tp_group.group)
