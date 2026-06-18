@@ -27,6 +27,7 @@ class GalvatronParallelArgs(BaseModel):
     global_checkpoint: int = Field(default=0, description="Global checkpoint flag.")
     cp_mode: Literal["ring", "zigzag"] = Field(default="zigzag", description="Context parallel communication mode.")
     sdp: Literal[0, 1] = Field(default=0, description="Apply SDP (zero-3).")
+    fsdp_version: Literal["fsdp1", "fsdp2"] = Field(default="fsdp1", description="FSDP backend version.")
     default_dp_type: Literal["ddp", "zero2", "zero3"] = Field(default="ddp", description="Default data parallel type.")
     pipeline_type: Literal["gpipe", "pipedream_flush"] = Field(default="gpipe", description="Galvatron pipeline type.")
     galvatron_config_path: Optional[str] = Field(

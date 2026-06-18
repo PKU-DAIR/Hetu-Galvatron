@@ -19,6 +19,7 @@ runtime:
     cp_mode: zigzag
     sdp: 0
     default_dp_type: ddp
+    fsdp_version: fsdp1
     pipeline_type: gpipe
     galvatron_config_path: null
     vocab_sdp: 0

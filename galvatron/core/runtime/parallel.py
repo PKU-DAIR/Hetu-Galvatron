@@ -12,9 +12,14 @@ from torch.distributed.fsdp._common_utils import _get_module_fsdp_state
 from torch.distributed.fsdp.api import BackwardPrefetch, CPUOffload, MixedPrecision, ShardingStrategy
 from torch.distributed.fsdp.wrap import _recursive_wrap, lambda_auto_wrap_policy
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.distributed.fsdp._fully_shard._fully_shard import fully_shard, FSDPModule
 
 from .redistribute import fused_split_allgather, split_to_group, gather_from_group
-
+from .comm_groups import CommGroup
+from galvatron.core.runtime.checkpoint.types import LoadModuleFunc
+from galvatron.core.runtime.parallel_state import fsdp2_enabled
+from galvatron.core.runtime.data_parallel.fsdp2_adapter import _mesh_from_group, _mixed_precision_policy, _get_matched_modules, apply_fsdp2_patch
+from galvatron.core.runtime.data_parallel.fsdp1_adapter import apply_fsdp1_patch
 
 def _get_modules_to_materialize(root_module: nn.Module) -> List[nn.Module]:
     # Run BFS to collect the modules to materialize via `reset_parameters()`,
@@ -328,6 +333,27 @@ def wrap_modules_data_parallel(
     from galvatron.core.runtime.parallel_state import get_args
 
     args = get_args()
+    if fsdp2_enabled():
+        return wrap_data_parallel_fsdp2(
+            module_list=module_list,
+            dp_types=dp_types,
+            dp_groups=dp_groups,
+            module_types=module_types,
+            dp_of_ep_groups=dp_of_ep_groups,
+            pp_devices=pp_devices,
+            mixed_precision=mixed_precision,
+            default_process_group=default_process_group,
+            wrap_block_name=wrap_block_name,
+            wrap_other_block_name=wrap_other_block_name,
+            tp_groups=tp_groups,
+            tp_of_ep_groups=tp_of_ep_groups,
+            ep_groups=ep_groups,
+            all_block_name=all_block_name,
+            load_module_func=load_module_func,
+        )
+
+    apply_fsdp1_patch()
+
     pp_on = True if args.parallel.pp_deg > 1 else False
     # pp_on = True if process_group.size < torch.distributed.get_world_size() else False
 
@@ -407,4 +433,145 @@ def wrap_modules_relocation(module_list, allgather_cp_groups, allgather_tp_sp_cp
             split_cp_groups[i], split_tp_sp_cp_groups[i], 
             fused_allgather_groups[i], fused_split_groups[i]
         )
+    return module_list
+
+
+def wrap_data_parallel_fsdp2(
+    module_list,
+    dp_types: List[int],
+    dp_groups: List[CommGroup],
+    module_types: List[str],
+    dp_of_ep_groups:List[CommGroup]=None,
+    pp_devices=None,
+    mixed_precision=torch.bfloat16,
+    default_process_group=None,
+    wrap_block_name=None,
+    wrap_other_block_name=None,
+    tp_groups=None,
+    tp_of_ep_groups=None,
+    ep_groups=None,
+    all_block_name=None,
+    load_module_func:LoadModuleFunc=None,
+):
+    assert len(module_list) == len(dp_types)
+    assert len(module_list) == len(dp_groups)
+    assert len(module_list) == len(module_types)
+
+    from galvatron.core.runtime.parallel_state import get_args
+    args = get_args()
+
+    # [Step 0] apply patch for fsdp2
+    apply_fsdp2_patch()
+
+    # [Step 1] fully_shard every module in module_list
+    for idx, module in enumerate(module_list):
+        # 1.1 determine FSDP type and corresponding args
+        fsdp_type = args.parallel.default_dp_type if dp_types[idx] == 0 else 'zero3'
+        assert fsdp_type in ("ddp", "zero2", "zero3"), f"unsupported dp_type {fsdp_type} for fsdp2"
+
+        reshard_after_forward = True if fsdp_type == 'zero3' else False
+        reshard_after_backward = True if fsdp_type == 'zero3' else False
+
+        fsdp_args = {
+            'mesh': _mesh_from_group(dp_groups[idx].group, fsdp_type),
+            'mp_policy': _mixed_precision_policy(mixed_precision, args.parallel.reduce_in_fp32),
+            'reshard_after_forward': reshard_after_forward,
+        }
+        moe_fsdp_args = None if not args.model.is_moe_model else {
+            'mesh': _mesh_from_group(dp_of_ep_groups[idx].group, fsdp_type),
+            'mp_policy': _mixed_precision_policy(mixed_precision, args.parallel.reduce_in_fp32),
+            'reshard_after_forward': reshard_after_forward,
+        }
+
+        # 1.2 find submodules to wrap based on module_type and wrap_block_name
+        target_block_classes = wrap_block_name if ("enc" in module_types[idx] or "dec" in module_types[idx]) else wrap_other_block_name
+        modules_to_wrap = _get_matched_modules(module, target_block_classes)
+
+        # 1.3 apply fully_shard, for MoE model, wrap MoE layer with dp_of_ep_groups and then wrap the whole block with dp_groups
+        if args.model.is_moe_model and ("enc" in module_types[idx] or "dec" in module_types[idx]):
+            assert len(modules_to_wrap) == 2, f"expected exactly 2 submodules to wrap for MoE model, but got {len(modules_to_wrap)} in module_list[{idx}]"
+            fully_shard(modules_to_wrap[1], **moe_fsdp_args)
+            fully_shard(modules_to_wrap[0], **fsdp_args)
+            setattr(modules_to_wrap[1], "scaling_groups", (dp_groups[idx].group, dp_of_ep_groups[idx].group))
+        else:
+            assert len(modules_to_wrap) == 1, f"expected exactly 1 submodule to wrap, but got {len(modules_to_wrap)} in module_list[{idx}]"
+            fully_shard(modules_to_wrap[0], **fsdp_args)
+
+        # 1.4 set reshard_after_backward
+        for module in modules_to_wrap:
+            module.set_reshard_after_backward(reshard_after_backward, recurse=False)
+
+    # [Step 2] fully_shard the root module_list
+    root_fsdp_args = {
+        'mesh': _mesh_from_group(dp_groups[0].group, args.parallel.default_dp_type), # use the vocab group as the root group
+        'mp_policy': _mixed_precision_policy(mixed_precision, args.parallel.reduce_in_fp32),
+        'reshard_after_forward': False, # For the root module, it's recommended to set False according to the fully_shard docstring.
+    }
+    module_list = fully_shard(module_list, **root_fsdp_args)
+    module_list: FSDPModule
+    module_list.set_reshard_after_backward(False, recurse=False) # Keep root params resident after backward, same reason as reshard_after_forward=False above.
+
+    # [Step 3] materialize parameters and move to target device
+    module_list = module_list.to_empty(device='cuda')
+    if args.ckpt.load is None:
+        module: nn.Module
+        for module in module_list.modules():
+            if callable(getattr(module, "reset_parameters", None)):
+                module.reset_parameters()
+    else:
+        for idx in range(len(module_list)):
+            target_block_classes = wrap_block_name if ("enc" in module_types[idx] or "dec" in module_types[idx]) else wrap_other_block_name
+            modules_to_materialize = _get_matched_modules(module_list[idx], target_block_classes)
+            for idx, module in enumerate(modules_to_materialize):
+                if idx == 1 and args.model.is_moe_model and ("enc" in module_types[idx] or "dec" in module_types[idx]):
+                    tp_group = tp_of_ep_groups[idx].group
+                else:
+                    tp_group = tp_groups[idx].group
+                for name, param in module.named_parameters():
+                    module_path, _ , param_name = name.rpartition(".")
+                    submodule = module.get_submodule(module_path)
+                    load_module_func(
+                        load=args.ckpt.load,
+                        tp_groups=tp_group,
+                        name=module_path,
+                        submodule=submodule,
+                        module=module,
+                        distributed_checkpoint=args.ckpt.distributed_checkpoint,
+                        ep_groups=ep_groups[idx].group if ep_groups is not None else None,
+                    )
+
+    # [Step 4] explicit forward prefetch and backward prefetch
+    all_fsdp2_module_list:List[FSDPModule] = []
+    for idx in range(len(module_list)):
+        for module in module_list[idx].modules():
+            if isinstance(module, FSDPModule):
+                all_fsdp2_module_list.append(module)
+
+    num_to_forward_prefetch = 1
+    for idx, module in enumerate(all_fsdp2_module_list):
+        module:FSDPModule
+        if idx >= len(all_fsdp2_module_list) - num_to_forward_prefetch:
+            break
+
+        modules_to_prefetch = [
+            all_fsdp2_module_list[idx + j] for j in range(1, num_to_forward_prefetch + 1)
+        ]
+        module.set_modules_to_forward_prefetch(modules_to_prefetch)
+
+    num_to_backward_prefetch = 1
+    for idx, module in enumerate(all_fsdp2_module_list):
+        module:FSDPModule
+        if idx < num_to_backward_prefetch:
+            state = module._get_fsdp_state()
+            # These modules run last in backward, so nothing is left to prefetch.
+            # `[None]` is non-empty (disables FSDP2's default PP-unsafe prefetch)
+            # but skipped by the patched `_pre_backward`, so no prefetch is issued.
+            state._states_to_backward_prefetch = [None]
+        else:
+            modules_to_prefetch = [
+                all_fsdp2_module_list[idx - j] for j in range(1, num_to_backward_prefetch + 1)
+            ]
+            module.set_modules_to_backward_prefetch(modules_to_prefetch)
+
+
     return module_list
