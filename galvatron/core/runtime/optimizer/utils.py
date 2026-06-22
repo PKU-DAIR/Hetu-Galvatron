@@ -91,6 +91,10 @@ def get_optimizer_and_param_scheduler(model, args):
     train_args = args.train
     optimizer_cls = Adam
     if fsdp2_enabled() and getattr(Adam, "__module__", "").startswith("apex"):
+        # Apex FusedAdam's fused CUDA kernel bypasses the dispatcher and is
+        # DTensor-unaware. Under FSDP2 parameters are sharded DTensors whose
+        # placement and grad updates the kernel cannot handle. Fall back to
+        # torch AdamW whose foreach ops go through __torch_dispatch__.
         from torch.optim import AdamW
         optimizer_cls = AdamW
     optimizer = optimizer_cls(

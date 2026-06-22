@@ -7,6 +7,7 @@ from einops import rearrange
 from galvatron.core.runtime.tensor_parallel.utils import VocabUtility
 
 from galvatron.core.runtime.parallel_state import get_args
+from galvatron.core.runtime.checkpoint.utils import copy_to_weight, copy_to_bias
 
 embedding_name = "transformer_embedding.pt"
 layer_name = "transformer_h_%d.pt"
@@ -34,7 +35,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
         vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_global_vocab_size(
             args.padded_vocab_size, rank, world_size
         )
-        submodule.weight.copy_(padded_weight[vocab_start_index:vocab_end_index])
+        copy_to_weight(submodule,padded_weight[vocab_start_index:vocab_end_index])
 
     elif name.endswith("embed_positions"):
         file_path = os.path.join(load, embedding_name)
@@ -44,20 +45,20 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
         # GalvatronEmbedding keeps full [seq_len, H] per rank; vocab-TP group can be
         # world_size > 1 while positions are not sharded across that group.
         if num_rows == weight.shape[0]:
-            submodule.weight.copy_(weight)
+            copy_to_weight(submodule,weight)
         else:
             seq_start_index, seq_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                 weight.shape[0], rank, world_size
             )
-            submodule.weight.copy_(weight[seq_start_index:seq_end_index])
+            copy_to_weight(submodule,weight[seq_start_index:seq_end_index])
 
     elif name == "norm":
         file_path = os.path.join(load, ln_f_name)
         checkpoint = torch.load(file_path, mmap=True, map_location="cpu")
         weight = checkpoint["weight"].to(device="cuda", dtype=torch.float32)
         bias = checkpoint["bias"].to(device="cuda", dtype=torch.float32)
-        submodule.weight.copy_(weight)
-        submodule.bias.copy_(bias)
+        copy_to_weight(submodule,weight)
+        copy_to_bias(submodule,bias)
 
     elif name == "lm_head":
         # _LMHeadLinear clones lm_head_proj weights at init; load same slice as lm_head_proj.
@@ -75,7 +76,7 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
         vocab_start_index, vocab_end_index = VocabUtility.vocab_range_from_global_vocab_size(
             args.padded_vocab_size, rank, world_size
         )
-        submodule.weight.copy_(padded_weight[vocab_start_index:vocab_end_index].contiguous())
+        copy_to_weight(submodule,padded_weight[vocab_start_index:vocab_end_index].contiguous())
 
     else:
         if not hasattr(module, "idx"):
@@ -89,8 +90,8 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
         if "input_layernorm" in name:
             weight = checkpoint["ln_1.weight"].to(device="cuda", dtype=torch.float32)
             bias = checkpoint["ln_1.bias"].to(device="cuda", dtype=torch.float32)
-            submodule.weight.copy_(weight)
-            submodule.bias.copy_(bias)
+            copy_to_weight(submodule,weight)
+            copy_to_bias(submodule,bias)
 
         elif "linear_qkv" in name:
             args = get_args()
@@ -112,8 +113,8 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
             weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                 bias.shape[0], rank, world_size
             )
-            submodule.weight.copy_(weight[weight_start_index:weight_end_index].contiguous())
-            submodule.bias.copy_(bias[weight_start_index:weight_end_index].contiguous())
+            copy_to_weight(submodule,weight[weight_start_index:weight_end_index].contiguous())
+            copy_to_bias(submodule,bias[weight_start_index:weight_end_index].contiguous())
 
         elif "linear_proj" in name:
             weight = checkpoint["attn.c_proj.weight"].to(device="cuda", dtype=torch.float32)
@@ -121,14 +122,14 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
             weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                 weight.shape[0], rank, world_size
             )
-            submodule.weight.copy_(weight[weight_start_index:weight_end_index].t().contiguous())
-            submodule.bias.copy_(bias.contiguous())
+            copy_to_weight(submodule,weight[weight_start_index:weight_end_index].t().contiguous())
+            copy_to_bias(submodule,bias.contiguous())
 
         elif "post_attention_layernorm" in name:
             weight = checkpoint["ln_2.weight"].to(device="cuda", dtype=torch.float32)
             bias = checkpoint["ln_2.bias"].to(device="cuda", dtype=torch.float32)
-            submodule.weight.copy_(weight)
-            submodule.bias.copy_(bias)
+            copy_to_weight(submodule,weight)
+            copy_to_bias(submodule,bias)
 
         elif "linear_fc1" in name:
             weight = checkpoint["mlp.c_fc.weight"].to(device="cuda", dtype=torch.float32)
@@ -137,8 +138,8 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
             weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                 weight.shape[0], rank, world_size
             )
-            submodule.weight.copy_(weight[weight_start_index:weight_end_index].contiguous())
-            submodule.bias.copy_(bias[weight_start_index:weight_end_index].contiguous())
+            copy_to_weight(submodule,weight[weight_start_index:weight_end_index].contiguous())
+            copy_to_bias(submodule,bias[weight_start_index:weight_end_index].contiguous())
 
         elif "linear_fc2" in name:
             weight = checkpoint["mlp.c_proj.weight"].to(device="cuda", dtype=torch.float32)
@@ -146,8 +147,8 @@ def load_hf_checkpoint(load, tp_groups, name, submodule, module):
             weight_start_index, weight_end_index = VocabUtility.vocab_range_from_global_vocab_size(
                 weight.shape[0], rank, world_size
             )
-            submodule.weight.copy_(weight[weight_start_index:weight_end_index].t().contiguous())
-            submodule.bias.copy_(bias.contiguous())
+            copy_to_weight(submodule,weight[weight_start_index:weight_end_index].t().contiguous())
+            copy_to_bias(submodule,bias.contiguous())
 
 
 @torch.no_grad()

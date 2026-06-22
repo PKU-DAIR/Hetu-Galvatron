@@ -109,11 +109,13 @@ def _allreduce_word_embedding_no_pipeline(wte_model, wte_attr_name, lmhead_model
     if fsdp2_enabled():
         wte_tensors = _local_datas(wte, attr='data')
         lmhead_tensors = _local_datas(lmhead, attr='data')
-        assert len(wte_tensors) == len(lmhead_tensors), f"tied embedding modules have mismatched tensors: {len(wte_tensors)} vs {len(lmhead_tensors)}"
-        for wte_t, lm_t in zip(wte_tensors, lmhead_tensors):
-            avg = (wte_t + lm_t) / 2
-            wte_t.copy_(avg)
-            lm_t.copy_(avg)
+        # Only the first param (token embedding weight) is tied;
+        # position embeddings etc. only exist in the wte module.
+        wte_t = wte_tensors[0]
+        lm_t = lmhead_tensors[0]
+        avg = (wte_t + lm_t) / 2
+        wte_t.copy_(avg)
+        lm_t.copy_(avg)
         return
 
     if hasattr(wte, "_handles"):
@@ -157,11 +159,12 @@ def _allreduce_word_embedding_grads_no_pipeline(wte_model, wte_attr_name, lmhead
     if fsdp2_enabled():
         wte_tensors = _local_datas(wte, attr='grad')
         lmhead_tensors = _local_datas(lmhead, attr='grad')
-        assert len(wte_tensors) == len(lmhead_tensors), f"tied embedding modules have mismatched tensors: {len(wte_tensors)} vs {len(lmhead_tensors)}"
-        for wte_t, lm_t in zip(wte_tensors, lmhead_tensors):
-            avg = (wte_t + lm_t) / 2
-            wte_t.copy_(avg)
-            lm_t.copy_(avg)
+        # Only the first param (token embedding weight) is tied.
+        wte_t = wte_tensors[0]
+        lm_t = lmhead_tensors[0]
+        avg = (wte_t + lm_t) / 2
+        wte_t.copy_(avg)
+        lm_t.copy_(avg)
         return
     
     if hasattr(wte, "_handles"):

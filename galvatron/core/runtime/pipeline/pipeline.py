@@ -11,6 +11,7 @@ from torch.distributed.fsdp._fully_shard._fully_shard import FSDPModule
 
 from galvatron.core.runtime.parallel import wrap_modules_checkpoint, wrap_modules_data_parallel
 from galvatron.core.runtime.parallel_state import get_args, fsdp2_enabled
+from galvatron.core.runtime.data_parallel.fsdp2_adapter import fsdp2_reduce_megatron_sp_norm_grads, set_reshard_after_backward_per_microbatch
 
 version_str = torch.__version__
 version_major, version_minor, _ = version_str.split(".")
@@ -278,9 +279,7 @@ class PipelineParallel(nn.Module):
                 if isinstance(m, FSDP):
                     m.last_batch = state
                 elif isinstance(m, FSDPModule): # fsdp2
-                    fsdp2_state = m._get_fsdp_state()
-                    if fsdp_param_group := fsdp2_state._fsdp_param_group:
-                        fsdp_param_group.last_batch = state
+                    set_reshard_after_backward_per_microbatch(m, state)
 
     def update_tensor_shape(self, microbatches, dp_size_input, dp_size, tp_size, sp_size, template_tensor_shape, cp_size=None):
         # Update tensor_shape with correct microbatch_size
@@ -417,6 +416,9 @@ class PipelineParallel(nn.Module):
         if num_microbatches > 1 and self.async_grad_reduce:
             exit_no_sync_context(model)
             fsdp_reduce_gradients(model)
+
+        if self.sequence_parallel and self.use_fsdp2:
+            fsdp2_reduce_megatron_sp_norm_grads(model)
 
         if self.finalize_wte_grads:
             torch.distributed.barrier()
@@ -746,6 +748,9 @@ class PipelineParallel(nn.Module):
             exit_no_sync_context(model)
             fsdp_reduce_gradients(model)
 
+        if self.sequence_parallel and self.use_fsdp2:
+            fsdp2_reduce_megatron_sp_norm_grads(model)
+
         if self.finalize_wte_grads and not forward_only:
             torch.distributed.barrier()
             self.finalize_wte_grads_func()
@@ -929,6 +934,9 @@ class PipelineParallel(nn.Module):
             model = self.model_cur_stage
             exit_no_sync_context(model)
             fsdp_reduce_gradients(model)
+
+        if self.sequence_parallel and self.use_fsdp2:
+            fsdp2_reduce_megatron_sp_norm_grads(model)
 
         if self.finalize_wte_grads:
             torch.distributed.barrier()
