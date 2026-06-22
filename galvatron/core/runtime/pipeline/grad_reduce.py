@@ -7,6 +7,9 @@ import torch.nn as nn
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torch.distributed.fsdp._common_utils import HandleTrainingState, TrainingState, _FSDPState
+from torch.distributed.fsdp._fully_shard._fully_shard import FSDPModule # fsdp2
+from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState as FSDPv2State
+from torch.distributed.tensor import DTensor # fsdp2
 from galvatron.core.runtime.utils.utils import is_torch_min_version
 
 if is_torch_min_version("2.5.0"):
@@ -30,6 +33,7 @@ from torch.distributed.fsdp._runtime_utils import _post_backward_final_callback,
 from torch.distributed.utils import _p_assert
 
 from galvatron.core.runtime.utils.utils import rgetattr, rhasattr
+from galvatron.core.runtime.parallel_state import fsdp2_enabled
 from .sp_grad_reduce import _post_backward_hook_sp as _post_backward_hook
 
 
@@ -46,6 +50,25 @@ def _send_backward_hook(
 
 
 def fsdp_reduce_gradients(model):
+    if fsdp2_enabled():
+        assert isinstance(model, FSDPModule), "Expect the model to be an instance of FSDPModule when fsdp2 is enabled."
+        root_states: List[FSDPv2State] = []
+        for m in model.modules():
+            if not isinstance(m, FSDPModule):
+                continue
+            state = m._get_fsdp_state()
+            param_group = state._fsdp_param_group
+            if param_group is not None:
+                assert param_group.reduce_grads == True, f'Expect to reduce gradients for param group {param_group} in module {m}'
+                assert param_group.all_reduce_grads == True, f'Expect to all-reduce gradients for param group {param_group} in module {m}'
+                param_group.post_backward()  # real reduce-scatter of accumulated grad
+            state._state_ctx.is_last_backward = True
+            if state._is_root:
+                root_states.append(state)
+        for state in root_states:
+            state._root_post_backward_final_callback()
+        return
+
     for m in model.modules():
         if isinstance(m, FSDP):
             m.training_state = TrainingState.FORWARD_BACKWARD
@@ -65,10 +88,36 @@ def fsdp_reduce_gradients(model):
             _post_backward_final_callback(m, m)
 
 
+def _is_dtensor(tensor) -> bool:
+    return DTensor is not None and isinstance(tensor, DTensor)
+
+
+def _local_datas(module: nn.Module, attr: str) -> List[torch.Tensor]:
+    tensors = []
+    for param in module.parameters():
+        value = getattr(param, attr, None)
+        if value is None:
+            continue
+        tensors.append(value.to_local() if _is_dtensor(value) else value)
+    return tensors
+
+
 @torch.no_grad()
 def _allreduce_word_embedding_no_pipeline(wte_model, wte_attr_name, lmhead_model, lmhead_attr_name):
     wte = wte_model.module
     lmhead = lmhead_model.module
+    if fsdp2_enabled():
+        wte_tensors = _local_datas(wte, attr='data')
+        lmhead_tensors = _local_datas(lmhead, attr='data')
+        # Only the first param (token embedding weight) is tied;
+        # position embeddings etc. only exist in the wte module.
+        wte_t = wte_tensors[0]
+        lm_t = lmhead_tensors[0]
+        avg = (wte_t + lm_t) / 2
+        wte_t.copy_(avg)
+        lm_t.copy_(avg)
+        return
+
     if hasattr(wte, "_handles"):
         for wte_handle, lmhead_handle in zip(wte._handles, lmhead._handles):
             assert wte_handle.flat_param.data is not None
@@ -87,6 +136,11 @@ def _allreduce_word_embedding_no_pipeline(wte_model, wte_attr_name, lmhead_model
 @torch.no_grad()
 def _allreduce_word_embedding(module, tied_wte_attr_name, group):
     word_embedding = module.module
+    if fsdp2_enabled():
+        for tensor in _local_datas(word_embedding, attr='data'):
+            dist.all_reduce(tensor, group=group, op=dist.ReduceOp.AVG)
+        return
+
     if hasattr(word_embedding, "_handles"):
         for handle in word_embedding._handles:
             assert handle.flat_param.data is not None
@@ -101,6 +155,18 @@ def _allreduce_word_embedding(module, tied_wte_attr_name, group):
 def _allreduce_word_embedding_grads_no_pipeline(wte_model, wte_attr_name, lmhead_model, lmhead_attr_name):
     wte = wte_model.module
     lmhead = lmhead_model.module
+
+    if fsdp2_enabled():
+        wte_tensors = _local_datas(wte, attr='grad')
+        lmhead_tensors = _local_datas(lmhead, attr='grad')
+        # Only the first param (token embedding weight) is tied.
+        wte_t = wte_tensors[0]
+        lm_t = lmhead_tensors[0]
+        avg = (wte_t + lm_t) / 2
+        wte_t.copy_(avg)
+        lm_t.copy_(avg)
+        return
+    
     if hasattr(wte, "_handles"):
         for wte_handle, lmhead_handle in zip(wte._handles, lmhead._handles):
             assert wte_handle.flat_param.grad is not None
@@ -120,6 +186,12 @@ def _allreduce_word_embedding_grads_no_pipeline(wte_model, wte_attr_name, lmhead
 @torch.no_grad()
 def _allreduce_word_embedding_grads(module, tied_wte_attr_name, group):
     word_embedding = module.module
+
+    if fsdp2_enabled():
+        for tensor in _local_datas(word_embedding, attr='grad'):
+            dist.all_reduce(tensor, group=group)
+        return
+    
     if hasattr(word_embedding, "_handles"):
         for handle in word_embedding._handles:
             assert handle.flat_param.grad is not None
@@ -130,6 +202,11 @@ def _allreduce_word_embedding_grads(module, tied_wte_attr_name, group):
 
 
 def enter_no_sync_context(model):
+    if fsdp2_enabled():
+        assert isinstance(model, FSDPModule), "Expect the model to be an instance of FSDPModule when fsdp2 is enabled."
+        model.set_requires_gradient_sync(False, recurse=True)
+        return
+
     if isinstance(model, FSDP):
         model.no_sync_context = model.no_sync()
         model.no_sync_context.__enter__()
@@ -143,6 +220,11 @@ def enter_no_sync_context(model):
 
 
 def exit_no_sync_context(model):
+    if fsdp2_enabled():
+        assert isinstance(model, FSDPModule), "Expect the model to be an instance of FSDPModule when fsdp2 is enabled."
+        model.set_requires_gradient_sync(True, recurse=True)
+        return
+
     if isinstance(model, FSDP):
         model.no_sync_context.__exit__(None, None, None)
     elif isinstance(model, nn.Sequential):
@@ -152,84 +234,3 @@ def exit_no_sync_context(model):
                     m.no_sync_context.__exit__(None, None, None)
                     break
 
-
-def _register_post_backward_hook_bf16(
-    state: _FSDPState,
-    handle: Optional[FlatParamHandle],
-) -> None:
-    """
-    Registers post-backward hooks on the ``FlatParameter`` s'
-    ``AccumulateGrad`` objects to reshard and to reduce-scatter gradients.
-
-    The ``AccumulateGrad`` object represents the last function that finalizes
-    the ``FlatParameter`` 's gradient, so it only runs after its entire
-    gradient computation has finished.
-
-    We register the post-backward hook only once in the *first* forward that a
-    ``FlatParameter`` participates in. This relies on the ``AccumulateGrad``
-    object being preserved through multiple forwards.
-
-    NOTE: We follow this heuristic to prefer the *first* forward to target the
-    parameter mixed precision case, where there are *separate*
-    ``AccumulateGrad`` objects across the different forwards. (Without
-    parameter mixed precision, the ``AccumulateGrad`` objects are the same.) If
-    we instead prefer the *last* forward, then the hook runs early.
-    """
-    # If there is no gradient computation, then there is no need for
-    # post-backward logic
-    if not torch.is_grad_enabled():
-        return
-    if not handle:
-        return
-    flat_param = handle.flat_param
-    already_registered = hasattr(flat_param, "_post_backward_hook_state")
-    # if already_registered or not flat_param.requires_grad:
-    #     return
-    if not already_registered:
-        flat_param._post_backward_hook_state = []
-    # Get the `AccumulateGrad` object
-    temp_flat_param = flat_param.expand_as(flat_param)
-    _p_assert(
-        temp_flat_param.grad_fn is not None,
-        "The `grad_fn` is needed to access the `AccumulateGrad` and " "register the post-backward hook",
-    )
-    acc_grad = temp_flat_param.grad_fn.next_functions[0][0]  # type: ignore[union-attr]
-    assert acc_grad is not None
-    hook_handle = acc_grad.register_hook(functools.partial(_post_backward_hook, state, handle))
-    flat_param._post_backward_hook_state.append((acc_grad, hook_handle))  # type: ignore[attr-defined]
-
-
-@no_type_check
-def _finalize_params_bf16(
-    state: _FSDPState,
-) -> None:
-    """Finalizes the parameters before the next iteration."""
-    handle = state._handle
-    if not handle:
-        return
-    flat_param = handle.flat_param
-    if hasattr(flat_param, "_post_backward_hook_state"):
-        # post_backward_hook_state_len = len(flat_param._post_backward_hook_state)
-        # expected_post_backward_hook_state_len = int(flat_param.requires_grad) + 1
-        # _p_assert(
-        #     post_backward_hook_state_len == expected_post_backward_hook_state_len,
-        #     f"Invalid: ``_post_backward_hook_state``: {flat_param._post_backward_hook_state}",
-        # )
-        if len(flat_param._post_backward_hook_state) > 0:
-            flat_param._post_backward_hook_state[0][-1].remove()
-            flat_param._post_backward_hook_state.pop(0)
-        # delattr(flat_param, "_post_backward_hook_state")
-    if flat_param.requires_grad:
-        if not state._sync_gradients:
-            # Preserve the gradient accumulation state if not synchronizing
-            # gradients: `.grad` remains the unsharded gradient  from prior
-            # `no_sync()` iterations, and `_saved_grad_shard` remains the
-            # sharded gradient from the last synchronized iteration
-            return
-        if not handle._has_optim_in_backward:
-            handle.prepare_gradient_for_optim()
-        _p_assert(
-            hasattr(flat_param, "_post_backward_called"),
-            "Expects `_post_backward_called` to be set on the `FlatParameter`",
-        )
-        flat_param._post_backward_called = False

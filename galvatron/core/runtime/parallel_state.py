@@ -378,3 +378,9 @@ _MOE_LAYER_WISE_LOGGING_TRACKER = {}
 def get_moe_layer_wise_logging_tracker():
     global _MOE_LAYER_WISE_LOGGING_TRACKER
     return _MOE_LAYER_WISE_LOGGING_TRACKER
+
+
+# --- FSDP2 Related Variables ---
+def fsdp2_enabled() -> bool:
+    args = get_args()
+    return args.parallel.fsdp_version == "fsdp2"

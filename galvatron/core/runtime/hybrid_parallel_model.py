@@ -16,7 +16,6 @@ from .hybrid_parallel_config import (
 from galvatron.core.runtime.models.builder import build_sequential_from_arch
 from .initialize import init_empty_weights
 from .parallel import wrap_modules_relocation
-from .pipeline.grad_reduce import _finalize_params_bf16, _register_post_backward_hook_bf16
 from galvatron.core.runtime.utils.utils import get_layernorm_offset, print_rank_0, rgetattr
 
 from galvatron.core.runtime.tensor_parallel.random import set_seed_with_group
@@ -131,10 +130,6 @@ def construct_hybrid_parallel_model_api(
 
     hp_configs = hybrid_parallel_configs
 
-    if args.parallel.mixed_precision == "bf16":
-        assert version_major > 1 and version_minor > 0, "Mixed precision training is only supported for torch > 2.0.1"
-        fsdp._runtime_utils._register_post_backward_hook = _register_post_backward_hook_bf16
-        fsdp._runtime_utils._finalize_params = _finalize_params_bf16
     # Get model-specific model info: module_types, layernum_list, layer_shapes_list, layer_dtypes_list
     module_types = model_info.module_types()
     layernum_list = model_info.layernums()
